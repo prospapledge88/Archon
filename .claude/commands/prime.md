@@ -53,6 +53,9 @@ Check current branch and working tree status:
 List any active worktrees:
 !`git worktree list`
 
+Check for upstream updates from Cole's origin (coleam00/archon) — skipped if no `upstream` remote:
+!`if git remote get-url upstream >/dev/null 2>&1; then git fetch upstream dev --quiet 2>/dev/null; BEHIND=$(git rev-list --count HEAD..upstream/dev 2>/dev/null || echo 0); if [ "$BEHIND" -gt 0 ]; then echo "⚠️  $BEHIND new commit(s) on coleam00/archon upstream/dev:"; git log --oneline HEAD..upstream/dev | head -10; else echo "✓ Up to date with upstream/dev"; fi; else echo "ℹ️  No 'upstream' remote. Add with: git remote add upstream https://github.com/coleam00/archon.git"; fi`
+
 ## Output Report
 
 Provide a concise summary (under 300 words) covering:
@@ -70,6 +73,7 @@ Provide a concise summary (under 300 words) covering:
 
 ### Current State
 - Active branch, recent changes, any uncommitted work
+- **Upstream sync**: if behind coleam00/archon `upstream/dev`, surface the count + offer to merge as a follow-up action
 - Any observations relevant to next task
 
 **Keep it scannable — bullets over prose.**
