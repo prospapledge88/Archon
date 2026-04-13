@@ -12,6 +12,7 @@ import * as archonPaths from '@archon/paths';
 import { BUNDLED_COMMANDS, isBinaryBuild } from './defaults/bundled-defaults';
 import { createLogger } from '@archon/paths';
 import { isValidCommandName } from './command-validation';
+import { sanitizeExternalContent } from './utils/sanitize-external';
 import type { LoadCommandResult } from './schemas';
 
 /** Lazy-initialized logger */
@@ -302,6 +303,11 @@ export function substituteWorkflowVariables(
   // Check if context variables exist (use fresh regex to avoid lastIndex issues)
   const hasContextVariables = new RegExp(CONTEXT_VAR_PATTERN_STR).test(result);
 
+  // Sanitize untrusted external content before substitution (Layer 1: strip, Layer 2: wrap)
+  const sanitizedContext = issueContext
+    ? sanitizeExternalContent(issueContext, 'github_issue')
+    : '';
+
   // Substitute or clear context variables (use fresh global regex for replace)
   if (!issueContext && hasContextVariables) {
     getLog().debug(
@@ -312,7 +318,7 @@ export function substituteWorkflowVariables(
       'context_variables_cleared'
     );
   }
-  result = result.replace(new RegExp(CONTEXT_VAR_PATTERN_STR, 'g'), issueContext ?? '');
+  result = result.replace(new RegExp(CONTEXT_VAR_PATTERN_STR, 'g'), sanitizedContext);
 
   return {
     prompt: result,
@@ -357,7 +363,7 @@ export function buildPromptWithContext(
 
   if (issueContext && !contextSubstituted) {
     getLog().debug({ logLabel }, 'issue_context_appended');
-    return prompt + '\n\n---\n\n' + issueContext;
+    return prompt + '\n\n---\n\n' + sanitizeExternalContent(issueContext, 'github_issue');
   }
 
   return prompt;
