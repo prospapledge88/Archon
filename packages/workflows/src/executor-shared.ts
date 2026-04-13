@@ -352,7 +352,8 @@ export function buildPromptWithContext(
   baseBranch: string,
   docsDir: string,
   issueContext: string | undefined,
-  logLabel: string
+  logLabel: string,
+  projectKnowledge?: string
 ): string {
   const { prompt, contextSubstituted } = substituteWorkflowVariables(
     template,
@@ -361,7 +362,10 @@ export function buildPromptWithContext(
     artifactsDir,
     baseBranch,
     docsDir,
-    issueContext
+    issueContext,
+    undefined, // loopUserInput — not used in buildPromptWithContext
+    undefined, // rejectionReason — not used in buildPromptWithContext
+    projectKnowledge
   );
 
   if (issueContext && !contextSubstituted) {

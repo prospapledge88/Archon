@@ -17,6 +17,9 @@ import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discover
 import { findWorkflow } from '@archon/workflows/router';
 import { executeWorkflow } from '@archon/workflows/executor';
 import * as conversationDb from '../db/conversations';
+import * as workflowEventDb from '../db/workflow-events';
+import * as workflowDb from '../db/workflows';
+import { recordWorkflowRun } from './knowledge-writer';
 import type { ScheduleEntry } from '../config/config-types';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -164,7 +167,7 @@ async function tick(): Promise<void> {
         conversation.id,
         schedule.codebaseId
       )
-        .then(result => {
+        .then(async result => {
           getLog().info(
             {
               workflowName: workflow.name,
@@ -174,6 +177,50 @@ async function tick(): Promise<void> {
             },
             'scheduler.dispatch_completed'
           );
+
+          // Record run in project knowledge (non-blocking)
+          if (result.workflowRunId) {
+            try {
+              const events = await workflowEventDb.listWorkflowEvents(result.workflowRunId);
+              const completed = events.filter(e => e.event_type === 'node_completed').length;
+              const failed = events.filter(e => e.event_type === 'node_failed').length;
+              const skipped = events.filter(e => e.event_type === 'node_skipped').length;
+              const errors = events
+                .filter(e => e.event_type === 'node_failed')
+                .map(e => {
+                  const rawError = e.data.error;
+                  const message = typeof rawError === 'string' ? rawError : 'Unknown error';
+                  return { nodeName: e.step_name ?? 'unknown', message };
+                });
+
+              const run = await workflowDb.getWorkflowRun(result.workflowRunId);
+              const costUsd =
+                typeof run?.metadata?.total_cost_usd === 'number'
+                  ? run.metadata.total_cost_usd
+                  : undefined;
+
+              await recordWorkflowRun(schedule.cwd, {
+                workflowName: workflow.name,
+                status: result.success ? 'completed' : 'failed',
+                startedAt: run?.started_at
+                  ? new Date(run.started_at).toISOString()
+                  : new Date().toISOString(),
+                completedAt: run?.completed_at
+                  ? new Date(run.completed_at).toISOString()
+                  : new Date().toISOString(),
+                costUsd,
+                nodesCompleted: completed,
+                nodesFailed: failed,
+                nodesSkipped: skipped,
+                errors,
+              });
+            } catch (error) {
+              getLog().error(
+                { err: error as Error, runId: result.workflowRunId },
+                'scheduler.knowledge_record_failed'
+              );
+            }
+          }
         })
         .catch(error => {
           getLog().error(
