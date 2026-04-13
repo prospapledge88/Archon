@@ -215,6 +215,35 @@ describe('substituteWorkflowVariables', () => {
     );
     expect(prompt).toBe('Fix: ');
   });
+
+  it('replaces $PROJECT_KNOWLEDGE with provided content', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'History: $PROJECT_KNOWLEDGE\nDo the work.',
+      'run-1',
+      'msg',
+      '/tmp',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      '# Run History\nEntry 1\nEntry 2'
+    );
+    expect(prompt).toContain('History: # Run History');
+    expect(prompt).toContain('Entry 2');
+  });
+
+  it('clears $PROJECT_KNOWLEDGE when not provided', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'History: $PROJECT_KNOWLEDGE done.',
+      'run-1',
+      'msg',
+      '/tmp',
+      'main',
+      'docs/'
+    );
+    expect(prompt).toBe('History:  done.');
+  });
 });
 
 describe('buildPromptWithContext', () => {

@@ -51,6 +51,9 @@ import { getCodebase } from '../db/codebases';
 import { executeWorkflow } from '@archon/workflows/executor';
 import type { WorkflowDefinition } from '@archon/workflows/schemas/workflow';
 import { createWorkflowDeps } from '../workflows/store-adapter';
+import { recordWorkflowRun } from '../services/knowledge-writer';
+import * as workflowEventDb from '../db/workflow-events';
+import * as workflowDb from '../db/workflows';
 import {
   cleanupToMakeRoom,
   getWorktreeStatusBreakdown,
@@ -249,6 +252,55 @@ export interface WorkflowRoutingContext {
 }
 
 /**
+ * Record a completed workflow run into the project's knowledge file.
+ * Non-blocking: always swallows errors so workflow completion never fails due
+ * to knowledge-writer issues.
+ */
+async function recordRunKnowledge(
+  cwd: string,
+  runId: string,
+  workflowName: string,
+  result: { success: boolean; error?: string }
+): Promise<void> {
+  try {
+    const events = await workflowEventDb.listWorkflowEvents(runId);
+    const completed = events.filter(e => e.event_type === 'node_completed').length;
+    const failed = events.filter(e => e.event_type === 'node_failed').length;
+    const skipped = events.filter(e => e.event_type === 'node_skipped').length;
+    const errors = events
+      .filter(e => e.event_type === 'node_failed')
+      .map(e => {
+        const rawError = e.data.error;
+        const message = typeof rawError === 'string' ? rawError : 'Unknown error';
+        return { nodeName: e.step_name ?? 'unknown', message };
+      });
+
+    const run = await workflowDb.getWorkflowRun(runId);
+    const costUsd =
+      typeof run?.metadata?.total_cost_usd === 'number' ? run.metadata.total_cost_usd : undefined;
+
+    await recordWorkflowRun(cwd, {
+      workflowName,
+      status: result.success ? 'completed' : 'failed',
+      startedAt: run?.started_at
+        ? new Date(run.started_at).toISOString()
+        : new Date().toISOString(),
+      completedAt: run?.completed_at
+        ? new Date(run.completed_at).toISOString()
+        : new Date().toISOString(),
+      costUsd,
+      nodesCompleted: completed,
+      nodesFailed: failed,
+      nodesSkipped: skipped,
+      errors,
+    });
+  } catch (error) {
+    // Non-blocking — log but never fail the workflow
+    getLog().error({ err: error as Error, runId }, 'knowledge.record_after_run_failed');
+  }
+}
+
+/**
  * Dispatch a workflow to run in a background worker conversation (web platform only).
  * Creates a hidden worker conversation, sets up event bridging from worker to parent,
  * and fires-and-forgets the workflow execution.
@@ -376,6 +428,10 @@ export async function dispatchBackgroundWorkflow(
           ctx.conversationDbId,
           preCreatedRun
         );
+        // Record run in project knowledge file (non-blocking, skip paused workflows)
+        if (!('paused' in result) && result.workflowRunId) {
+          void recordRunKnowledge(workerCwd, result.workflowRunId, workflow.name, result);
+        }
         // Surface workflow output to parent conversation as a result card
         if ('paused' in result) {
           // Paused workflows (approval gates) — no result card yet
