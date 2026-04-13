@@ -118,6 +118,8 @@ export {
   SESSION_RETENTION_DAYS,
 } from './services/cleanup-service';
 
+export { startWorkflowScheduler, stopWorkflowScheduler } from './services/workflow-scheduler';
+
 export { generateAndSetTitle } from './services/title-generator';
 
 // =============================================================================
