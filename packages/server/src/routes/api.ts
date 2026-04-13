@@ -69,6 +69,7 @@ import * as isolationEnvDb from '@archon/core/db/isolation-environments';
 import * as workflowDb from '@archon/core/db/workflows';
 import * as workflowEventDb from '@archon/core/db/workflow-events';
 import * as messageDb from '@archon/core/db/messages';
+import * as analyticsDb from '@archon/core/db/workflow-analytics';
 import { errorSchema } from './schemas/common.schemas';
 import { updateCheckResponseSchema } from './schemas/system.schemas';
 import {
@@ -122,6 +123,7 @@ import {
   configResponseSchema,
   codebaseEnvironmentsResponseSchema,
 } from './schemas/config.schemas';
+import { costAnalyticsQuerySchema, costAnalyticsResponseSchema } from './schemas/analytics.schemas';
 
 // Read app version: use build-time constant in binary, package.json in dev
 let appVersion = 'unknown';
@@ -852,6 +854,21 @@ const getUpdateCheckRoute = createRoute({
       },
       description: 'Update check result',
     },
+  },
+});
+
+const getCostAnalyticsRoute = createRoute({
+  method: 'get',
+  path: '/api/analytics/costs',
+  tags: ['Analytics'],
+  summary: 'Get aggregated workflow cost analytics',
+  request: { query: costAnalyticsQuerySchema },
+  responses: {
+    200: {
+      content: { 'application/json': { schema: costAnalyticsResponseSchema } },
+      description: 'Cost analytics for the requested period',
+    },
+    500: jsonError('Server error'),
   },
 });
 
@@ -2520,6 +2537,81 @@ export function registerApiRoutes(
       status: 200,
       headers: { 'Content-Type': contentType },
     });
+  });
+
+  // GET /api/analytics/costs - Aggregated workflow cost analytics
+  registerOpenApiRoute(getCostAnalyticsRoute, async c => {
+    try {
+      const daysRaw = Number(c.req.query('days') ?? '30');
+      const days = Number.isNaN(daysRaw) ? 30 : Math.min(Math.max(1, daysRaw), 365);
+      const now = new Date();
+      const from = new Date(now);
+      from.setDate(from.getDate() - days);
+      const sinceDate = from.toISOString();
+
+      const [workflowRows, dailyRows] = await Promise.all([
+        analyticsDb.getCostByWorkflow(sinceDate),
+        analyticsDb.getDailyCosts(sinceDate),
+      ]);
+
+      // Aggregate by workflow name (rows are split by status)
+      const byWorkflowMap = new Map<string, { costUsd: number; runs: number }>();
+      let totalCostUsd = 0;
+      let totalRuns = 0;
+      let successfulRuns = 0;
+      let failedRuns = 0;
+      let successCostUsd = 0;
+      let failedCostUsd = 0;
+
+      for (const row of workflowRows) {
+        const entry = byWorkflowMap.get(row.workflow_name) ?? {
+          costUsd: 0,
+          runs: 0,
+        };
+        entry.costUsd += row.cost_usd;
+        entry.runs += row.run_count;
+        if (row.status === 'completed') {
+          successfulRuns += row.run_count;
+          successCostUsd += row.cost_usd;
+        } else {
+          failedRuns += row.run_count;
+          failedCostUsd += row.cost_usd;
+        }
+        totalCostUsd += row.cost_usd;
+        totalRuns += row.run_count;
+        byWorkflowMap.set(row.workflow_name, entry);
+      }
+
+      const byWorkflow = [...byWorkflowMap.entries()]
+        .map(([workflowName, data]) => ({
+          workflowName,
+          costUsd: Math.round(data.costUsd * 10000) / 10000,
+          runs: data.runs,
+          avgCostUsd: data.runs > 0 ? Math.round((data.costUsd / data.runs) * 10000) / 10000 : 0,
+        }))
+        .sort((a, b) => b.costUsd - a.costUsd);
+
+      const daily = dailyRows.map(row => ({
+        date: row.date,
+        costUsd: Math.round(row.cost_usd * 10000) / 10000,
+        runs: row.run_count,
+      }));
+
+      return c.json({
+        period: { days, from: sinceDate, to: now.toISOString() },
+        totalCostUsd: Math.round(totalCostUsd * 10000) / 10000,
+        totalRuns,
+        successfulRuns,
+        failedRuns,
+        successCostUsd: Math.round(successCostUsd * 10000) / 10000,
+        failedCostUsd: Math.round(failedCostUsd * 10000) / 10000,
+        byWorkflow,
+        daily,
+      });
+    } catch (error) {
+      getLog().error({ err: error }, 'cost_analytics_failed');
+      return apiError(c, 500, 'Failed to get cost analytics');
+    }
   });
 
   // GET /api/config - Read-only configuration (safe subset only — no filesystem paths)
