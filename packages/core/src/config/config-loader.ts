@@ -217,6 +217,7 @@ function getDefaults(): MergedConfig {
       loadDefaultWorkflows: true,
     },
     allowTargetRepoKeys: false,
+    schedules: [],
   };
 }
 
@@ -406,6 +407,17 @@ function mergeRepoConfig(merged: MergedConfig, repo: RepoConfig): MergedConfig {
     if (repo.allow_target_repo_keys) {
       warnEnvLeakGateDisabledOnce('repo_config');
     }
+  }
+
+  // Propagate schedule entries from repo config
+  if (repo.schedules && Array.isArray(repo.schedules)) {
+    result.schedules = repo.schedules
+      .filter(s => s.workflow && s.cron)
+      .map(s => ({
+        workflow: s.workflow,
+        cron: s.cron,
+        enabled: s.enabled ?? true,
+      }));
   }
 
   return result;

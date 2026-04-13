@@ -65,6 +65,8 @@ import {
   classifyAndFormatError,
   startCleanupScheduler,
   stopCleanupScheduler,
+  startWorkflowScheduler,
+  stopWorkflowScheduler,
   loadConfig,
   logConfig,
   getPort,
@@ -249,6 +251,9 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // Start cleanup scheduler
   startCleanupScheduler();
+
+  // Start workflow scheduler (fires workflows on cron schedules)
+  void startWorkflowScheduler();
 
   // Mark workflow runs orphaned by previous process termination as failed
   void createWorkflowStore()
@@ -657,6 +662,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
   const shutdown = (): void => {
     getLog().info('server_shutting_down');
     stopCleanupScheduler();
+    stopWorkflowScheduler();
     persistence.stopPeriodicFlush();
 
     // Flush all buffered messages before stopping adapters

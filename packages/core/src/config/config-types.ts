@@ -104,6 +104,19 @@ export interface GlobalConfig {
 }
 
 /**
+ * A scheduled workflow trigger entry.
+ * Defined in per-repo .archon/config.yaml under `schedules:`.
+ */
+export interface ScheduleEntry {
+  /** Workflow name — resolved via findWorkflow() at load time */
+  workflow: string;
+  /** Standard 5-field cron expression (minute hour dom month dow) */
+  cron: string;
+  /** Whether this schedule is active. @default true */
+  enabled?: boolean;
+}
+
+/**
  * Repository configuration (project-specific settings)
  * Located at .archon/config.yaml in any repository
  */
@@ -180,6 +193,12 @@ export interface RepoConfig {
    * YAML key: `allow_target_repo_keys`
    */
   allow_target_repo_keys?: boolean;
+
+  /**
+   * Scheduled workflow triggers for this repository.
+   * Each entry specifies a workflow name and cron expression.
+   */
+  schedules?: ScheduleEntry[];
 
   /**
    * Default commands/workflows configuration
@@ -271,6 +290,12 @@ export interface MergedConfig {
    * @default false
    */
   allowTargetRepoKeys: boolean;
+
+  /**
+   * Active scheduled workflow triggers collected from repo config.
+   * Empty array when no schedules are configured.
+   */
+  schedules: ScheduleEntry[];
 }
 
 /**
