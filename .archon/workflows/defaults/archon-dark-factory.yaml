@@ -1,0 +1,196 @@
+name: archon-dark-factory
+description: |
+  Use when: You want archon to autonomously pick up and implement GitHub
+  issues labeled `archon:auto`. Designed to run on a cron schedule.
+
+  Triggers: Manual invocation or scheduled trigger (recommended).
+
+  How it works:
+  1. Fetches the oldest unassigned GitHub issue with the `archon:auto` label
+  2. Plans the implementation using project knowledge from prior runs
+  3. Implements in a fresh session
+  4. Runs validation loop (tests/lint/type-check) with up to 5 fix iterations
+  5. Creates a draft PR
+  6. On success: comments on the issue with the PR link
+  7. On failure: removes `archon:auto`, adds `archon:failed`, posts error summary
+
+  Exits cleanly when no issues match (no-op run).
+
+  ## Setup
+
+  1. Create the labels (one-time):
+     ```
+     gh label create archon:auto --description "Archon will auto-implement"
+     gh label create archon:failed --description "Archon tried and failed"
+     ```
+
+  2. Add to `.archon/config.yaml` to run every 30 minutes:
+     ```yaml
+     schedules:
+       - workflow: archon-dark-factory
+         cron: "*/30 * * * *"
+     ```
+
+  3. Label an issue to queue it:
+     ```
+     gh issue edit 123 --add-label archon:auto
+     ```
+
+  The scheduler picks it up within 30 minutes.
+
+provider: claude
+model: sonnet
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 1: FETCH
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: fetch-issue
+    bash: |
+      set -euo pipefail
+      ISSUE_JSON=$(gh issue list \
+        --label "archon:auto" \
+        --assignee "" \
+        --state open \
+        --sort created \
+        --limit 1 \
+        --json number,title,body,labels,url 2>/dev/null || echo "[]")
+      COUNT=$(echo "$ISSUE_JSON" | jq 'length')
+      if [ "$COUNT" -eq 0 ]; then
+        echo '{"has_issue": false}'
+        exit 0
+      fi
+      ISSUE=$(echo "$ISSUE_JSON" | jq '.[0]')
+      echo "{\"has_issue\": true, \"issue\": $ISSUE}"
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 2: PLAN (uses project knowledge for context)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: plan
+    prompt: |
+      You are planning the implementation of a GitHub issue.
+
+      ## Issue Data (JSON)
+      $fetch-issue.output
+
+      ## Prior Run History for This Project
+      $PROJECT_KNOWLEDGE
+
+      ## Your Task
+
+      1. Parse the issue JSON to understand the title, body, and labels.
+      2. Review the prior run history. Note any patterns — recurring failures,
+         successful approaches, files that often need changes.
+      3. Write a focused implementation plan to `$ARTIFACTS_DIR/plan.md` covering:
+         - What file(s) to change
+         - What specific change to make
+         - How to validate the change worked
+         - Any risks or edge cases
+
+      Keep the plan short and concrete. The implementation agent reads this
+      in a fresh session with no other context from this run.
+    depends_on: [fetch-issue]
+    when: "$fetch-issue.output.has_issue == 'true'"
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 3: IMPLEMENT (fresh session, reads plan artifact)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: implement
+    command: archon-implement
+    depends_on: [plan]
+    when: "$fetch-issue.output.has_issue == 'true'"
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 4: VALIDATE (loop with up to 5 fix iterations)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: validate
+    loop:
+      until: "COMPLETE"
+      max_iterations: 5
+      prompt: |
+        Run the project's validation commands and fix any failures.
+
+        Commands to run (adapt to the project's actual setup — check CLAUDE.md
+        or package.json scripts if the standard names don't exist):
+        1. Type check (e.g., `bun run type-check`, `npm run typecheck`, `tsc --noEmit`)
+        2. Lint (e.g., `bun run lint`, `npm run lint`)
+        3. Tests (e.g., `bun run test`, `npm test`)
+
+        If any fail, analyze the failure and fix the code. Re-run the failing
+        command to verify the fix before moving on.
+
+        When ALL checks pass, output the literal string `COMPLETE` on its own line.
+        Do NOT output `COMPLETE` until every check is green.
+    depends_on: [implement]
+    when: "$fetch-issue.output.has_issue == 'true'"
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 5: CREATE PR
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: create-pr
+    command: archon-create-pr
+    depends_on: [validate]
+    when: "$fetch-issue.output.has_issue == 'true'"
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 6: FINALIZE
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: success
+    bash: |
+      set -euo pipefail
+      # Engine substitutes $fetch-issue.output as a shell-escaped single-quoted string,
+      # so piping it into jq is safe even when the issue body contains special characters.
+      ISSUE_NUM=$(echo $fetch-issue.output | jq -r '.issue.number')
+      PR_OUTPUT=$create-pr.output
+      # Extract first URL-looking token from PR output (most PR-create tools print the URL)
+      PR_URL=$(echo "$PR_OUTPUT" | grep -oE 'https://[^ ]+' | head -1)
+      if [ -z "$PR_URL" ]; then
+        PR_URL="(PR created; see workflow artifacts for details)"
+      fi
+      gh issue comment "$ISSUE_NUM" --body "🤖 archon auto-implemented this issue.
+
+      Draft PR: $PR_URL
+      Workflow run: $WORKFLOW_ID
+
+      The \`archon:auto\` label has been kept in case you want to rerun after review."
+      echo "Success: issue #$ISSUE_NUM → PR $PR_URL"
+    depends_on: [create-pr]
+    trigger_rule: all_success
+    when: "$fetch-issue.output.has_issue == 'true'"
+
+  - id: failure
+    bash: |
+      set -euo pipefail
+      # Skip when create-pr succeeded (success node already handled the happy path).
+      # Skipped upstream nodes produce empty output, so a non-empty $create-pr.output
+      # means the happy path completed and this failure-handler is a no-op.
+      PR_OUTPUT=$create-pr.output
+      if [ -n "$PR_OUTPUT" ]; then
+        echo "create-pr succeeded; failure handler is a no-op."
+        exit 0
+      fi
+      ISSUE_NUM=$(echo $fetch-issue.output | jq -r '.issue.number // empty')
+      if [ -z "$ISSUE_NUM" ]; then
+        echo "No issue to flag (fetch-issue returned no issue)."
+        exit 0
+      fi
+      # Remove archon:auto, add archon:failed — best-effort (ignore label errors)
+      gh issue edit "$ISSUE_NUM" --remove-label "archon:auto" 2>&1 || true
+      gh issue edit "$ISSUE_NUM" --add-label "archon:failed" 2>&1 || true
+      gh issue comment "$ISSUE_NUM" --body "⚠️ archon attempted to implement this issue but failed.
+
+      Workflow run: $WORKFLOW_ID
+      Check the run artifacts for error details.
+
+      The \`archon:auto\` label has been removed. Add it back to retry after investigating."
+      echo "Failure flagged: issue #$ISSUE_NUM"
+    depends_on: [fetch-issue, plan, implement, validate, create-pr]
+    trigger_rule: all_done
+    when: "$fetch-issue.output.has_issue == 'true'"
