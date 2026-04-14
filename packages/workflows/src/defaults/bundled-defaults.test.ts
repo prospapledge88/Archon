@@ -81,6 +81,7 @@ describe('bundled-defaults', () => {
         'archon-assist',
         'archon-comprehensive-pr-review',
         'archon-create-issue',
+        'archon-dark-factory',
         'archon-feature-development',
         'archon-fix-github-issue',
         'archon-resolve-conflicts',
@@ -97,7 +98,7 @@ describe('bundled-defaults', () => {
         expect(BUNDLED_WORKFLOWS).toHaveProperty(wf);
       }
 
-      expect(Object.keys(BUNDLED_WORKFLOWS)).toHaveLength(13);
+      expect(Object.keys(BUNDLED_WORKFLOWS)).toHaveLength(14);
     });
 
     it('should have non-empty content for all workflows', () => {

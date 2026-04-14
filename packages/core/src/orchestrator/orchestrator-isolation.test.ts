@@ -42,6 +42,18 @@ mock.module('../db/sessions', () => ({
   transitionSession: mock(() => Promise.resolve(null)),
 }));
 
+mock.module('../db/workflows', () => ({
+  getWorkflowRun: mock(() => Promise.resolve(null)),
+}));
+
+mock.module('../db/workflow-events', () => ({
+  listWorkflowEvents: mock(() => Promise.resolve([])),
+}));
+
+mock.module('../services/knowledge-writer', () => ({
+  recordWorkflowRun: mock(() => Promise.resolve()),
+}));
+
 mock.module('../handlers/command-handler', () => ({
   handleCommand: mock(() => Promise.resolve({ message: '', modified: false, success: true })),
   parseCommand: mock((msg: string) => ({

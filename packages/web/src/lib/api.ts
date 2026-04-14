@@ -501,3 +501,45 @@ export type UpdateCheckResult = components['schemas']['UpdateCheckResponse'];
 export async function getUpdateCheck(): Promise<UpdateCheckResult> {
   return fetchJSON<UpdateCheckResult>('/api/update-check');
 }
+
+// Cost analytics
+export interface WorkflowCostEntry {
+  workflowName: string;
+  costUsd: number;
+  runs: number;
+  avgCostUsd: number;
+}
+
+export interface DailyCostEntry {
+  date: string;
+  costUsd: number;
+  runs: number;
+}
+
+export interface TopFailingWorkflow {
+  workflowName: string;
+  failureRate: number;
+  failedRuns: number;
+  totalRuns: number;
+}
+
+export interface CostAnalytics {
+  period: { days: number; from: string; to: string };
+  totalCostUsd: number;
+  totalRuns: number;
+  successfulRuns: number;
+  failedRuns: number;
+  successCostUsd: number;
+  failedCostUsd: number;
+  byWorkflow: WorkflowCostEntry[];
+  daily: DailyCostEntry[];
+  successRate: number;
+  avgDurationSeconds: number;
+  topFailingWorkflows: TopFailingWorkflow[];
+}
+
+export async function getCostAnalytics(days = 30): Promise<CostAnalytics> {
+  const res = await fetch(`${SSE_BASE_URL}/api/analytics/costs?days=${String(days)}`);
+  if (!res.ok) throw new Error(`Failed to fetch cost analytics: ${String(res.status)}`);
+  return res.json() as Promise<CostAnalytics>;
+}

@@ -6,7 +6,7 @@
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
 import { readFile } from 'fs/promises';
-import { resolve, isAbsolute } from 'path';
+import { resolve, isAbsolute, join } from 'path';
 import { execFileAsync } from '@archon/git';
 import { discoverScripts } from './script-discovery';
 import type {
@@ -725,7 +725,8 @@ async function executeNodeInternal(
   nodeOutputs: Map<string, NodeOutput>,
   resumeSessionId: string | undefined,
   configuredCommandFolder?: string,
-  issueContext?: string
+  issueContext?: string,
+  projectKnowledge?: string
 ): Promise<NodeExecutionResult> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -802,7 +803,8 @@ async function executeNodeInternal(
       baseBranch,
       docsDir,
       issueContext,
-      `dag node '${node.id}' prompt`
+      `dag node '${node.id}' prompt`,
+      projectKnowledge
     );
   } catch (error) {
     const err = error as Error;
@@ -1314,7 +1316,8 @@ async function executeBashNode(
   baseBranch: string,
   docsDir: string,
   nodeOutputs: Map<string, NodeOutput>,
-  issueContext?: string
+  issueContext?: string,
+  projectKnowledge?: string
 ): Promise<NodeOutput> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -1352,7 +1355,10 @@ async function executeBashNode(
     artifactsDir,
     baseBranch,
     docsDir,
-    issueContext
+    issueContext,
+    undefined, // loopUserInput
+    undefined, // rejectionReason
+    projectKnowledge
   );
   const finalScript = substituteNodeOutputRefs(substitutedScript, nodeOutputs, true);
 
@@ -1464,7 +1470,8 @@ async function executeScriptNode(
   baseBranch: string,
   docsDir: string,
   nodeOutputs: Map<string, NodeOutput>,
-  issueContext?: string
+  issueContext?: string,
+  projectKnowledge?: string
 ): Promise<NodeOutput> {
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -1502,7 +1509,10 @@ async function executeScriptNode(
     artifactsDir,
     baseBranch,
     docsDir,
-    issueContext
+    issueContext,
+    undefined, // loopUserInput
+    undefined, // rejectionReason
+    projectKnowledge
   );
   const finalScript = substituteNodeOutputRefs(substitutedScript, nodeOutputs, false);
 
@@ -1712,7 +1722,8 @@ async function executeLoopNode(
   docsDir: string,
   nodeOutputs: Map<string, NodeOutput>,
   config: WorkflowConfig,
-  issueContext?: string
+  issueContext?: string,
+  projectKnowledge?: string
 ): Promise<NodeExecutionResult> {
   const loop = node.loop;
   const msgContext = { workflowId: workflowRun.id, nodeName: node.id };
@@ -1813,7 +1824,9 @@ async function executeLoopNode(
         baseBranch,
         docsDir,
         issueContext,
-        i === startIteration ? loopUserInput : ''
+        i === startIteration ? loopUserInput : '',
+        undefined, // rejectionReason
+        projectKnowledge
       );
       const finalPrompt = substituteNodeOutputRefs(substitutedPrompt, nodeOutputs);
 
@@ -2011,7 +2024,10 @@ async function executeLoopNode(
           artifactsDir,
           baseBranch,
           docsDir,
-          issueContext
+          issueContext,
+          undefined, // loopUserInput
+          undefined, // rejectionReason
+          projectKnowledge
         );
         const substitutedBash = substituteNodeOutputRefs(
           bashPrompt,
@@ -2205,7 +2221,8 @@ async function executeApprovalNode(
   config: WorkflowConfig,
   workflowLevelOptions: WorkflowLevelOptions,
   configuredCommandFolder?: string,
-  issueContext?: string
+  issueContext?: string,
+  projectKnowledge?: string
 ): Promise<NodeOutput> {
   const msgContext = { workflowId: workflowRun.id, nodeName: node.id };
 
@@ -2263,7 +2280,8 @@ async function executeApprovalNode(
       docsDir,
       issueContext,
       undefined, // loopUserInput
-      rejectionReason
+      rejectionReason,
+      projectKnowledge
     );
 
     // Build a synthetic PromptNode to reuse executeNodeInternal
@@ -2302,7 +2320,8 @@ async function executeApprovalNode(
       nodeOutputs,
       undefined, // fresh session
       configuredCommandFolder,
-      issueContext
+      issueContext,
+      projectKnowledge
     );
 
     if (output.state === 'failed') {
@@ -2408,6 +2427,14 @@ export async function executeDagWorkflow(
     },
     'dag_workflow_starting'
   );
+
+  // Read cross-run project knowledge for $PROJECT_KNOWLEDGE substitution
+  let projectKnowledge = '';
+  try {
+    projectKnowledge = await readFile(join(cwd, '.archon', 'knowledge', 'run-history.md'), 'utf-8');
+  } catch {
+    // No knowledge file — first run or feature not yet used
+  }
 
   // Session threading: for sequential single-node layers, thread the session forward.
   // For parallel layers (>1 node), always fresh (can't share a session).
@@ -2593,7 +2620,8 @@ export async function executeDagWorkflow(
               baseBranch,
               docsDir,
               nodeOutputs,
-              issueContext
+              issueContext,
+              projectKnowledge
             );
             return { nodeId: node.id, output };
           }
@@ -2643,7 +2671,8 @@ export async function executeDagWorkflow(
               docsDir,
               nodeOutputs,
               config,
-              issueContext
+              issueContext,
+              projectKnowledge
             );
             return { nodeId: node.id, output };
           }
@@ -2667,7 +2696,8 @@ export async function executeDagWorkflow(
               config,
               workflowLevelOptions,
               configuredCommandFolder,
-              issueContext
+              issueContext,
+              projectKnowledge
             );
             return { nodeId: node.id, output };
           }
@@ -2718,7 +2748,8 @@ export async function executeDagWorkflow(
               baseBranch,
               docsDir,
               nodeOutputs,
-              issueContext
+              issueContext,
+              projectKnowledge
             );
             return { nodeId: node.id, output };
           }
@@ -2769,7 +2800,8 @@ export async function executeDagWorkflow(
               // ensures the source is never mutated, so retries can safely resume from it.
               resumeSessionId,
               configuredCommandFolder,
-              issueContext
+              issueContext,
+              projectKnowledge
             );
 
             if (output.state !== 'failed') break;

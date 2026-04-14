@@ -150,7 +150,10 @@ describe('substituteWorkflowVariables', () => {
       'docs/',
       '## Issue #42\nBug report'
     );
-    expect(prompt).toBe('Fix this: ## Issue #42\nBug report');
+    expect(prompt).toContain('Fix this:');
+    expect(prompt).toContain('<external_context source="github_issue">');
+    expect(prompt).toContain('## Issue #42\nBug report');
+    expect(prompt).toContain('</external_context>');
     expect(contextSubstituted).toBe(true);
   });
 
@@ -164,7 +167,13 @@ describe('substituteWorkflowVariables', () => {
       'docs/',
       'context-data'
     );
-    expect(prompt).toBe('Issue: context-data. External: context-data');
+    expect(prompt).toContain('Issue:');
+    expect(prompt).toContain('External:');
+    expect(prompt).toContain('<external_context source="github_issue">');
+    expect(prompt).toContain('context-data');
+    // Both variables should be wrapped
+    const wrapperCount = (prompt.match(/<external_context/g) ?? []).length;
+    expect(wrapperCount).toBe(2);
   });
 
   it('clears context variables when issueContext is undefined', () => {
@@ -206,6 +215,35 @@ describe('substituteWorkflowVariables', () => {
     );
     expect(prompt).toBe('Fix: ');
   });
+
+  it('replaces $PROJECT_KNOWLEDGE with provided content', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'History: $PROJECT_KNOWLEDGE\nDo the work.',
+      'run-1',
+      'msg',
+      '/tmp',
+      'main',
+      'docs/',
+      undefined,
+      undefined,
+      undefined,
+      '# Run History\nEntry 1\nEntry 2'
+    );
+    expect(prompt).toContain('History: # Run History');
+    expect(prompt).toContain('Entry 2');
+  });
+
+  it('clears $PROJECT_KNOWLEDGE when not provided', () => {
+    const { prompt } = substituteWorkflowVariables(
+      'History: $PROJECT_KNOWLEDGE done.',
+      'run-1',
+      'msg',
+      '/tmp',
+      'main',
+      'docs/'
+    );
+    expect(prompt).toBe('History:  done.');
+  });
 });
 
 describe('buildPromptWithContext', () => {
@@ -221,6 +259,7 @@ describe('buildPromptWithContext', () => {
       'test prompt'
     );
     expect(result).toContain('Do the thing');
+    expect(result).toContain('<external_context source="github_issue">');
     expect(result).toContain('## Issue #42');
   });
 
@@ -236,8 +275,9 @@ describe('buildPromptWithContext', () => {
       'test prompt'
     );
     // Context was substituted inline, should not be appended again
-    const contextCount = (result.match(/## Issue #42/g) ?? []).length;
-    expect(contextCount).toBe(1);
+    // Count external_context wrappers — should be exactly 1 (from the substitution)
+    const wrapperCount = (result.match(/<external_context/g) ?? []).length;
+    expect(wrapperCount).toBe(1);
   });
 
   it('returns prompt unchanged when no issueContext provided', () => {

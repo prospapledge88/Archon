@@ -18,6 +18,8 @@ import {
 import type { WorkflowRunStatus } from '@/lib/types';
 import { ensureUtc } from '@/lib/format';
 import { StatusSummaryBar } from '@/components/dashboard/StatusSummaryBar';
+import { CostSummaryCard } from '@/components/dashboard/CostSummaryCard';
+import { WorkflowHealthCard } from '@/components/dashboard/WorkflowHealthCard';
 import { WorkflowRunGroup } from '@/components/dashboard/WorkflowRunGroup';
 import { WorkflowRunCard } from '@/components/dashboard/WorkflowRunCard';
 import { WorkflowHistoryTable } from '@/components/dashboard/WorkflowHistoryTable';
@@ -326,6 +328,9 @@ export function DashboardPage(): React.ReactElement {
           codebases={codebases}
           health={health}
         />
+
+        <CostSummaryCard />
+        <WorkflowHealthCard />
 
         {actionError && (
           <div className="rounded-md border border-error/30 bg-error/5 px-4 py-3 text-sm text-error">
