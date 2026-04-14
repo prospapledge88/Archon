@@ -8,6 +8,8 @@
  * - Dispatches via executeWorkflow() with a logging-only adapter
  */
 import { createLogger } from '@archon/paths';
+import { getIsolationProvider } from '@archon/isolation';
+import { toRepoPath } from '@archon/git';
 import { matchesCron } from './cron-parser';
 import { SchedulePlatformAdapter } from './schedule-adapter';
 import { loadConfig } from '../config/config-loader';
@@ -17,8 +19,10 @@ import { discoverWorkflowsWithConfig } from '@archon/workflows/workflow-discover
 import { findWorkflow } from '@archon/workflows/router';
 import { executeWorkflow } from '@archon/workflows/executor';
 import * as conversationDb from '../db/conversations';
+import * as isolationDb from '../db/isolation-environments';
 import * as workflowEventDb from '../db/workflow-events';
 import * as workflowDb from '../db/workflows';
+import { pool } from '../db/connection';
 import { recordWorkflowRun } from './knowledge-writer';
 import type { ScheduleEntry } from '../config/config-types';
 
@@ -43,6 +47,33 @@ interface ResolvedSchedule {
 let tickIntervalId: ReturnType<typeof setInterval> | undefined;
 let resolvedSchedules: ResolvedSchedule[] = [];
 let tickCount = 0;
+
+/**
+ * Check whether any scheduled run of the same workflow is already running or paused
+ * for this codebase. Scheduled runs now execute in worktrees (not schedule.cwd), so
+ * path-based overlap checks don't catch concurrent ticks — hence the codebase +
+ * workflow-name check.
+ */
+async function hasActiveScheduledRun(codebaseId: string, workflowName: string): Promise<boolean> {
+  try {
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*) as count FROM remote_agent_workflow_runs
+       WHERE codebase_id = $1
+         AND workflow_name = $2
+         AND status IN ('running', 'paused')`,
+      [codebaseId, workflowName]
+    );
+    return Number(result.rows[0]?.count ?? 0) > 0;
+  } catch (error) {
+    // Conservative: on DB error, report no active run so dispatch can proceed.
+    // Worst case is a double-dispatch that the user can cancel manually.
+    getLog().warn(
+      { err: error as Error, codebaseId, workflowName },
+      'scheduler.active_run_check_failed'
+    );
+    return false;
+  }
+}
 
 /**
  * Scan all registered codebases and collect active schedule entries.
@@ -105,20 +136,6 @@ async function tick(): Promise<void> {
     try {
       if (!matchesCron(schedule.entry.cron, now)) continue;
 
-      // Check for active run on same path (skip if already running)
-      const activeRun = await deps.store.getActiveWorkflowRunByPath(schedule.cwd);
-      if (activeRun) {
-        getLog().debug(
-          {
-            workflowName: schedule.entry.workflow,
-            codebase: schedule.codebaseName,
-            activeRunId: activeRun.id,
-          },
-          'scheduler.skip_active_run'
-        );
-        continue;
-      }
-
       // Discover workflows for this codebase
       const { workflows: discoveredWorkflows } = await discoverWorkflowsWithConfig(
         schedule.cwd,
@@ -134,15 +151,83 @@ async function tick(): Promise<void> {
         continue;
       }
 
+      // Check for any currently-running scheduled run of this same workflow in this
+      // codebase. Scheduled runs use worktrees (not schedule.cwd), so the old
+      // path-based check from getActiveWorkflowRunByPath no longer catches overlaps.
+      const hasActive = await hasActiveScheduledRun(schedule.codebaseId, workflow.name);
+      if (hasActive) {
+        getLog().debug(
+          { workflowName: workflow.name, codebase: schedule.codebaseName },
+          'scheduler.skip_active_scheduled_run'
+        );
+        continue;
+      }
+
+      // Create an isolated worktree for this scheduled run. Same pattern as the CLI
+      // (see packages/cli/src/commands/workflow.ts:467-499). Without this, the run
+      // would commit and push from the user's live checkout.
+      const provider = getIsolationProvider();
+      const timestamp = Date.now();
+      const branchIdentifier = `schedule-${schedule.entry.workflow}-${String(timestamp)}`;
+
+      let isolatedEnv;
+      let isolationEnvId: string;
+      try {
+        isolatedEnv = await provider.create({
+          workflowType: 'task',
+          identifier: branchIdentifier,
+          codebaseId: schedule.codebaseId,
+          canonicalRepoPath: toRepoPath(schedule.cwd),
+          description: `Scheduled: ${schedule.entry.workflow}`,
+        });
+
+        const envRecord = await isolationDb.create({
+          codebase_id: schedule.codebaseId,
+          workflow_type: 'task',
+          workflow_id: branchIdentifier,
+          provider: 'worktree',
+          working_path: isolatedEnv.workingPath,
+          branch_name: isolatedEnv.branchName,
+          created_by_platform: 'schedule',
+          metadata: {},
+        });
+
+        isolationEnvId = envRecord.id;
+
+        getLog().info(
+          {
+            workflowName: workflow.name,
+            codebase: schedule.codebaseName,
+            workingPath: isolatedEnv.workingPath,
+            branchName: isolatedEnv.branchName,
+          },
+          'scheduler.worktree_created'
+        );
+      } catch (error) {
+        getLog().error(
+          {
+            err: error as Error,
+            workflowName: workflow.name,
+            codebase: schedule.codebaseName,
+          },
+          'scheduler.worktree_create_failed'
+        );
+        continue; // Skip this schedule entry; try again next tick
+      }
+
       // Create a synthetic conversation for this scheduled run
-      const conversationId = `schedule-${schedule.entry.workflow}-${Date.now()}`;
+      const conversationId = `schedule-${schedule.entry.workflow}-${String(timestamp)}`;
       const conversation = await conversationDb.getOrCreateConversation(
         'schedule',
         conversationId,
         schedule.codebaseId
       );
-      // Mark as hidden so it doesn't clutter the UI listing
-      await conversationDb.updateConversation(conversation.id, { hidden: true });
+      // Mark as hidden and link to the isolation env + worktree cwd
+      await conversationDb.updateConversation(conversation.id, {
+        hidden: true,
+        isolation_env_id: isolationEnvId,
+        cwd: isolatedEnv.workingPath,
+      });
 
       const userMessage = `Scheduled run (${schedule.entry.cron})`;
 
@@ -152,6 +237,7 @@ async function tick(): Promise<void> {
           codebase: schedule.codebaseName,
           cron: schedule.entry.cron,
           conversationId: conversation.id,
+          workingPath: isolatedEnv.workingPath,
         },
         'scheduler.dispatch_started'
       );
@@ -161,7 +247,7 @@ async function tick(): Promise<void> {
         deps,
         adapter,
         conversationId,
-        schedule.cwd,
+        isolatedEnv.workingPath,
         workflow,
         userMessage,
         conversation.id,
