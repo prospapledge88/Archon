@@ -95,13 +95,11 @@ describe('workflow-analytics db', () => {
 
   describe('empty result', () => {
     test('getCostByWorkflow returns [] when no rows', async () => {
-      mockQuery.mockResolvedValueOnce(createQueryResult([]));
       const result = await getCostByWorkflow('2026-04-14T00:00:00Z');
       expect(result).toEqual([]);
     });
 
     test('getDailyCosts returns [] when no rows', async () => {
-      mockQuery.mockResolvedValueOnce(createQueryResult([]));
       const result = await getDailyCosts('2026-04-14T00:00:00Z');
       expect(result).toEqual([]);
     });
@@ -113,7 +111,6 @@ describe('workflow-analytics db', () => {
     });
 
     test('getAvgDuration returns 0 when result has no rows', async () => {
-      mockQuery.mockResolvedValueOnce(createQueryResult([]));
       const result = await getAvgDuration('2026-04-14T00:00:00Z');
       expect(result).toBe(0);
     });
@@ -126,16 +123,11 @@ describe('workflow-analytics db', () => {
   });
 
   describe('getAvgDuration clock-skew exclusion', () => {
-    test('SQL filters out rows where completed_at < started_at', async () => {
-      await getAvgDuration('2026-04-14T00:00:00Z');
-      const { sql } = getCallArgs(0);
-      expect(sql).toContain('completed_at >= started_at');
-    });
-
-    test('SQL filters out rows where completed_at IS NULL', async () => {
+    test('SQL excludes rows with missing or earlier completed_at', async () => {
       await getAvgDuration('2026-04-14T00:00:00Z');
       const { sql } = getCallArgs(0);
       expect(sql).toContain('completed_at IS NOT NULL');
+      expect(sql).toContain('completed_at >= started_at');
     });
   });
 

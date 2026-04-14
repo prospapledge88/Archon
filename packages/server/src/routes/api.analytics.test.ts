@@ -1,9 +1,11 @@
 import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { OpenAPIHono } from '@hono/zod-openapi';
+import type { z } from '@hono/zod-openapi';
 import type { ConversationLockManager } from '@archon/core';
 import type { WebAdapter } from '../adapters/web';
 import { validationErrorHook } from './openapi-defaults';
 import { mockAllWorkflowModules } from '../test/workflow-mock-factories';
+import { costAnalyticsResponseSchema } from './schemas/analytics.schemas';
 
 // ---------------------------------------------------------------------------
 // Mock setup — must be before dynamic imports of mocked modules
@@ -157,25 +159,7 @@ function makeApp(): OpenAPIHono {
   return app;
 }
 
-type CostAnalyticsResponse = {
-  period: { days: number; from: string; to: string };
-  totalCostUsd: number;
-  totalRuns: number;
-  successfulRuns: number;
-  failedRuns: number;
-  successCostUsd: number;
-  failedCostUsd: number;
-  byWorkflow: Array<{ workflowName: string; costUsd: number; runs: number; avgCostUsd: number }>;
-  daily: Array<{ date: string; costUsd: number; runs: number }>;
-  successRate: number;
-  avgDurationSeconds: number;
-  topFailingWorkflows: Array<{
-    workflowName: string;
-    failureRate: number;
-    failedRuns: number;
-    totalRuns: number;
-  }>;
-};
+type CostAnalyticsResponse = z.infer<typeof costAnalyticsResponseSchema>;
 
 async function fetchAnalytics(app: OpenAPIHono, days = 7): Promise<CostAnalyticsResponse> {
   const res = await app.request(`/api/analytics/costs?days=${days}`);
@@ -263,26 +247,17 @@ describe('GET /api/analytics/costs', () => {
     expect(body.topFailingWorkflows).toHaveLength(3);
   });
 
-  test('response contains the full CostAnalytics contract', async () => {
+  test('response matches CostAnalyticsResponse schema contract', async () => {
     seedWorkflowRows([{ name: 'demo', completed: 5, failed: 0 }]);
     const body = await fetchAnalytics(makeApp(), 7);
 
-    expect(body).toHaveProperty('period');
-    expect(body.period.days).toBe(7);
-    expect(body).toHaveProperty('totalCostUsd');
-    expect(body).toHaveProperty('totalRuns');
-    expect(body).toHaveProperty('successfulRuns');
-    expect(body).toHaveProperty('failedRuns');
-    expect(body).toHaveProperty('successCostUsd');
-    expect(body).toHaveProperty('failedCostUsd');
-    expect(body).toHaveProperty('byWorkflow');
-    expect(body).toHaveProperty('daily');
-    expect(body).toHaveProperty('successRate');
-    expect(body).toHaveProperty('avgDurationSeconds');
-    expect(body).toHaveProperty('topFailingWorkflows');
-    expect(Array.isArray(body.byWorkflow)).toBe(true);
-    expect(Array.isArray(body.daily)).toBe(true);
-    expect(Array.isArray(body.topFailingWorkflows)).toBe(true);
+    const parseResult = costAnalyticsResponseSchema.safeParse(body);
+    if (!parseResult.success) {
+      throw new Error(
+        `Response does not match schema: ${JSON.stringify(parseResult.error.issues, null, 2)}`
+      );
+    }
+    expect(parseResult.data.period.days).toBe(7);
   });
 
   test('rejects days=0 via schema validation', async () => {
