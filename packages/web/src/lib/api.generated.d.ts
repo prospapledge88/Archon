@@ -1717,6 +1717,53 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  '/api/analytics/costs': {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /** Get aggregated workflow cost analytics */
+    get: {
+      parameters: {
+        query?: {
+          days?: number;
+        };
+        header?: never;
+        path?: never;
+        cookie?: never;
+      };
+      requestBody?: never;
+      responses: {
+        /** @description Cost analytics for the requested period */
+        200: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['CostAnalyticsResponse'];
+          };
+        };
+        /** @description Server error */
+        500: {
+          headers: {
+            [name: string]: unknown;
+          };
+          content: {
+            'application/json': components['schemas']['Error'];
+          };
+        };
+      };
+    };
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   '/api/config': {
     parameters: {
       query?: never;
@@ -2483,6 +2530,38 @@ export interface components {
     };
     CommandListResponse: {
       commands: components['schemas']['CommandEntry'][];
+    };
+    CostAnalyticsResponse: {
+      period: {
+        days: number;
+        from: string;
+        to: string;
+      };
+      totalCostUsd: number;
+      totalRuns: number;
+      successfulRuns: number;
+      failedRuns: number;
+      successCostUsd: number;
+      failedCostUsd: number;
+      byWorkflow: {
+        workflowName: string;
+        costUsd: number;
+        runs: number;
+        avgCostUsd: number;
+      }[];
+      daily: {
+        date: string;
+        costUsd: number;
+        runs: number;
+      }[];
+      successRate: number;
+      avgDurationSeconds: number;
+      topFailingWorkflows: {
+        workflowName: string;
+        failureRate: number;
+        failedRuns: number;
+        totalRuns: number;
+      }[];
     };
     SafeConfig: {
       botName: string;

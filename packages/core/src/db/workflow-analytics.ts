@@ -123,11 +123,14 @@ export async function getAvgDuration(sinceDate: string): Promise<number> {
        FROM remote_agent_workflow_runs
        WHERE started_at >= $1
          AND status IN ('completed', 'failed')
-         AND completed_at IS NOT NULL`,
+         AND completed_at IS NOT NULL
+         AND completed_at >= started_at`,
       [sinceDate]
     );
     const raw = result.rows[0]?.avg_seconds;
-    return raw == null ? 0 : Number(raw);
+    if (raw == null) return 0;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? parsed : 0;
   } catch (error) {
     getLog().error({ err: error as Error, sinceDate }, 'avg_duration_query_failed');
     throw error;
