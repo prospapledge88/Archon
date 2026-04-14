@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-14
+
+Six harness-engineering improvements inspired by Cole Medin's "Full Archon Guide"
+livestream — prompt injection defense, cost analytics, scheduled workflow triggers,
+cross-run project knowledge, a dark-factory reference workflow, and workflow health
+metrics. Includes three rounds of peer-review fixes from independent code reviews.
+
+### Added
+
+- **Prompt injection defense for workflow inputs**: two-layer defense for untrusted
+  external content flowing into workflow prompts via `$CONTEXT`, `$ISSUE_CONTEXT`,
+  and `$EXTERNAL_CONTEXT`. Layer 1 strips known injection patterns (LLM role markers,
+  Anthropic turn delimiters, instruction overrides, trust-boundary breakers). Layer 2
+  wraps the sanitized content in an XML trust boundary. Applied automatically in
+  `substituteWorkflowVariables()`; logs stripped patterns at warn level.
+- **Cost analytics API and dashboard**: new `GET /api/analytics/costs` endpoint
+  returning total spend, per-workflow cost breakdown, daily buckets, and
+  success/failure cost splits. `CostSummaryCard` on the dashboard shows total spend,
+  top 3 workflows by cost, and success vs. failure cost.
+- **Scheduled workflow triggers**: new `schedules:` configuration in per-repo
+  `.archon/config.yaml` with standard 5-field cron expressions. The scheduler runs
+  on a 60-second tick, evaluates due schedules, and dispatches workflows via a
+  dedicated worktree per run. Lightweight cron parser supports wildcards, ranges,
+  steps, and lists — no external dependencies.
+- **Cross-run project knowledge**: every workflow run now contributes a
+  deterministic summary entry to `.archon/knowledge/run-history.md` (newest first,
+  capped at 50 entries). Workflow prompts can inject prior run history via the new
+  `$PROJECT_KNOWLEDGE` variable, giving future runs institutional memory.
+- **Dark-factory reference workflow**: new bundled `archon-dark-factory` YAML
+  demonstrating the autonomous-issue-processing pattern. Fetches GitHub issues
+  labeled `archon:auto`, plans with prior run context, implements in a fresh
+  session via bridge-artifacts handoff, validates with a 5-iteration fix loop,
+  creates a draft PR, and manages labels and comments on success/failure.
+- **Workflow health metrics on the dashboard**: new `WorkflowHealthCard` shows
+  success rate, average run duration, and top 3 failing workflows (with a noise
+  filter excluding workflows under 3 terminal runs). Shares a TanStack Query
+  cache entry with `CostSummaryCard` — one network call feeds both widgets.
+
+### Changed
+
+- `substituteWorkflowVariables()` accepts a new optional `projectKnowledge`
+  parameter for `$PROJECT_KNOWLEDGE` substitution; `buildPromptWithContext()`
+  threads it through. All existing call sites pass it explicitly.
+- `byWorkflowMap` aggregation in the analytics handler now tracks success and
+  failure run counts per workflow so health metrics can derive per-workflow
+  failure rates.
+- Scheduled workflow dispatch now creates a dedicated worktree per run instead
+  of executing against the codebase's live checkout, matching the CLI's default
+  isolation behaviour.
+- `CostAnalytics` response shape extended with `successRate`, `avgDurationSeconds`,
+  and `topFailingWorkflows` fields. Schema name preserved as `CostAnalyticsResponse`
+  for compatibility with the existing dashboard.
+- `api.generated.d.ts` regenerated from the OpenAPI spec so analytics types are
+  derived from the canonical schema again.
+
+### Fixed
+
+- Dark-factory plan→implement handoff: the implement node now uses a
+  `bridge-artifacts` bash node that copies `plan.md` to `investigation.md` plus
+  the `archon-fix-issue` command, so the artifact handoff works regardless of
+  how `$ARGUMENTS` is set at dispatch time.
+- Dark-factory success handler now swaps `archon:auto` → `archon:done` (preventing
+  infinite re-processing by the scheduler) and reads the canonical PR URL from
+  `$ARTIFACTS_DIR/.pr-url` instead of grepping the command's stdout.
+- Dark-factory failure handler uses the `.pr-url` sentinel file to distinguish
+  "create-pr streamed text then failed" from genuine success, closing a gap
+  where neither success nor failure comments would post.
+- Dark-factory setup instructions in the workflow description are now idempotent
+  (`gh label create ... || true`) and include the new `archon:done` label.
+- Scheduler path-based overlap check replaced with a codebase + workflow-name
+  check, since scheduled runs now use worktree paths instead of the codebase root.
+- `getAvgDuration` guards against negative durations from clock skew via
+  `AND completed_at >= started_at`; also filters non-finite values in the JS
+  coercion to protect against PostgreSQL NUMERIC edge cases.
+- Dashboard cards share an identical `queryKey: ['cost-analytics', { days: 30 }]`
+  so a single network request feeds both `CostSummaryCard` and `WorkflowHealthCard`.
+- `WorkflowHealthCard` uses the existing `formatDurationMs` helper from
+  `@/lib/format` so duration renders consistently across all dashboard cards
+  (was previously rendering `2m 30s` beside other cards' `2.5m`).
+
 ## [0.3.5] - 2026-04-10
 
 Fixes for `archon serve` process lifecycle and static file serving.
