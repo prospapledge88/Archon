@@ -105,3 +105,31 @@ export async function getDailyCosts(sinceDate: string): Promise<DailyCostRow[]> 
     throw error;
   }
 }
+
+/**
+ * Get the average duration (in seconds) of terminal workflow runs in the period.
+ * Dialect-aware: SQLite uses julianday() arithmetic, PostgreSQL uses EXTRACT(EPOCH FROM ...).
+ * Returns 0 when no terminal runs exist.
+ */
+export async function getAvgDuration(sinceDate: string): Promise<number> {
+  try {
+    const durationExpr =
+      getDatabaseType() === 'postgresql'
+        ? 'EXTRACT(EPOCH FROM (completed_at - started_at))'
+        : '(julianday(completed_at) - julianday(started_at)) * 86400';
+
+    const result = await pool.query<{ avg_seconds: string | number | null }>(
+      `SELECT AVG(${durationExpr}) as avg_seconds
+       FROM remote_agent_workflow_runs
+       WHERE started_at >= $1
+         AND status IN ('completed', 'failed')
+         AND completed_at IS NOT NULL`,
+      [sinceDate]
+    );
+    const raw = result.rows[0]?.avg_seconds;
+    return raw == null ? 0 : Number(raw);
+  } catch (error) {
+    getLog().error({ err: error as Error, sinceDate }, 'avg_duration_query_failed');
+    throw error;
+  }
+}
