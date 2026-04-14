@@ -516,6 +516,13 @@ export interface DailyCostEntry {
   runs: number;
 }
 
+export interface TopFailingWorkflow {
+  workflowName: string;
+  failureRate: number;
+  failedRuns: number;
+  totalRuns: number;
+}
+
 export interface CostAnalytics {
   period: { days: number; from: string; to: string };
   totalCostUsd: number;
@@ -526,6 +533,9 @@ export interface CostAnalytics {
   failedCostUsd: number;
   byWorkflow: WorkflowCostEntry[];
   daily: DailyCostEntry[];
+  successRate: number;
+  avgDurationSeconds: number;
+  topFailingWorkflows: TopFailingWorkflow[];
 }
 
 export async function getCostAnalytics(days = 30): Promise<CostAnalytics> {
