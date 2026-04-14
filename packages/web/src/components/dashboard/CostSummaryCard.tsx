@@ -1,7 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
 import { DollarSign, CheckCircle2, XCircle } from 'lucide-react';
-import { getCostAnalytics } from '@/lib/api';
 import type { CostAnalytics } from '@/lib/api';
+import { useCostAnalytics } from '@/hooks/useCostAnalytics';
 
 function formatCost(usd: number): string {
   return `$${usd.toFixed(usd >= 10 ? 2 : 4)}`;
@@ -59,11 +58,7 @@ function CostBreakdown({ data }: { data: CostAnalytics }): React.ReactElement {
 }
 
 export function CostSummaryCard(): React.ReactElement | null {
-  const { data, isLoading } = useQuery({
-    queryKey: ['cost-analytics', { days: 30 }],
-    queryFn: () => getCostAnalytics(30),
-    staleTime: 30_000,
-  });
+  const { data, isLoading } = useCostAnalytics(30);
 
   // Hide card when loading or no data
   if (isLoading || !data || data.totalRuns === 0) return null;
