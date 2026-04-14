@@ -18,8 +18,6 @@ import {
   type TokenUsage,
 } from '../types';
 import { createLogger } from '@archon/paths';
-import { scanPathForSensitiveKeys, EnvLeakError } from '../utils/env-leak-scanner';
-import * as codebaseDb from '../db/codebases';
 import { loadConfig } from '../config/config-loader';
 import { resolveCodexBinaryPath } from '../utils/codex-binary-resolver';
 
@@ -178,30 +176,12 @@ export class CodexClient implements IAssistantClient {
     resumeSessionId?: string,
     options?: AssistantRequestOptions
   ): AsyncGenerator<MessageChunk> {
-    // Load config once — used for env-leak gate and (on first call) codexBinaryPath resolution.
+    // Load config once — used for codexBinaryPath resolution on first call.
     let mergedConfig: Awaited<ReturnType<typeof loadConfig>> | undefined;
     try {
       mergedConfig = await loadConfig(cwd);
     } catch (configErr) {
-      // Fail-closed: config load failure enforces the env-leak gate (allowTargetRepoKeys stays false)
-      getLog().warn({ err: configErr, cwd }, 'env_leak_gate.config_load_failed_gate_enforced');
-    }
-
-    // Pre-spawn: check for env key leak if codebase is not explicitly consented.
-    // Use prefix lookup so worktree paths (e.g. .../worktrees/feature-branch) still
-    // match the registered source cwd (e.g. .../source).
-    const codebase =
-      (await codebaseDb.findCodebaseByDefaultCwd(cwd)) ??
-      (await codebaseDb.findCodebaseByPathPrefix(cwd));
-    if (codebase && !codebase.allow_env_keys) {
-      // Fail-closed: a config load failure must NOT silently bypass the gate.
-      const allowTargetRepoKeys = mergedConfig?.allowTargetRepoKeys ?? false;
-      if (!allowTargetRepoKeys) {
-        const report = scanPathForSensitiveKeys(cwd);
-        if (report.findings.length > 0) {
-          throw new EnvLeakError(report, 'spawn-existing');
-        }
-      }
+      getLog().warn({ err: configErr, cwd }, 'codex.config_load_failed');
     }
 
     // Initialize Codex SDK with binary path override (resolved from env/config/vendor).

@@ -39,9 +39,6 @@ import { createLogger } from '@archon/paths';
 // stripCwdEnv() at entry point stripped CWD .env keys + CLAUDECODE markers,
 // then ~/.archon/.env was loaded as the trusted source. All keys the user sets
 // in ~/.archon/.env are intentional and pass through to the subprocess.
-import { scanPathForSensitiveKeys, EnvLeakError } from '../utils/env-leak-scanner';
-import * as codebaseDb from '../db/codebases';
-import { loadConfig } from '../config/config-loader';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 let cachedLog: ReturnType<typeof createLogger> | undefined;
@@ -275,31 +272,6 @@ export class ClaudeClient implements IAssistantClient {
     resumeSessionId?: string,
     requestOptions?: AssistantRequestOptions
   ): AsyncGenerator<MessageChunk> {
-    // Pre-spawn: check for env key leak if codebase is not explicitly consented.
-    // Use prefix lookup so worktree paths (e.g. .../worktrees/feature-branch) still
-    // match the registered source cwd (e.g. .../source).
-    const codebase =
-      (await codebaseDb.findCodebaseByDefaultCwd(cwd)) ??
-      (await codebaseDb.findCodebaseByPathPrefix(cwd));
-    if (codebase && !codebase.allow_env_keys) {
-      // Fail-closed: a config load failure (corrupt YAML, permission denied)
-      // must NOT silently bypass the gate. Catch, log, and treat as
-      // `allowTargetRepoKeys = false` so the scanner still runs.
-      let allowTargetRepoKeys = false;
-      try {
-        const merged = await loadConfig(cwd);
-        allowTargetRepoKeys = merged.allowTargetRepoKeys;
-      } catch (configErr) {
-        getLog().warn({ err: configErr, cwd }, 'env_leak_gate.config_load_failed_gate_enforced');
-      }
-      if (!allowTargetRepoKeys) {
-        const report = scanPathForSensitiveKeys(cwd);
-        if (report.findings.length > 0) {
-          throw new EnvLeakError(report, 'spawn-existing');
-        }
-      }
-    }
-
     // Note: If subprocess crashes mid-stream after yielding chunks, those chunks
     // are already consumed by the caller. Retry starts a fresh subprocess, so the
     // caller may receive partial output from the failed attempt followed by full

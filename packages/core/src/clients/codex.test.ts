@@ -1,4 +1,4 @@
-import { describe, test, expect, mock, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, test, expect, mock, beforeEach } from 'bun:test';
 import { createMockLogger } from '../test/mocks/logger';
 
 const mockLogger = createMockLogger();
@@ -40,8 +40,6 @@ mock.module('@openai/codex-sdk', () => ({
 }));
 
 import { CodexClient } from './codex';
-import * as codebaseDb from '../db/codebases';
-import * as envLeakScanner from '../utils/env-leak-scanner';
 
 describe('CodexClient', () => {
   let client: CodexClient;
@@ -1000,110 +998,6 @@ describe('CodexClient', () => {
         await expect(consumeGenerator()).rejects.toThrow(/Codex unknown/);
         expect(mockRunStreamed).toHaveBeenCalledTimes(1);
       });
-    });
-  });
-
-  describe('pre-spawn env leak gate', () => {
-    let spyFindByDefaultCwd: ReturnType<typeof spyOn>;
-    let spyFindByPathPrefix: ReturnType<typeof spyOn>;
-    let spyScan: ReturnType<typeof spyOn>;
-
-    beforeEach(() => {
-      // Restore a working runStreamed default so retry-test bleed doesn't break gate tests
-      mockRunStreamed.mockResolvedValue({
-        events: (async function* () {
-          yield { type: 'turn.completed', usage: defaultUsage };
-        })(),
-      });
-      spyFindByDefaultCwd = spyOn(codebaseDb, 'findCodebaseByDefaultCwd').mockResolvedValue(null);
-      spyFindByPathPrefix = spyOn(codebaseDb, 'findCodebaseByPathPrefix').mockResolvedValue(null);
-      spyScan = spyOn(envLeakScanner, 'scanPathForSensitiveKeys').mockReturnValue({
-        path: '/workspace',
-        findings: [],
-      });
-    });
-
-    afterEach(() => {
-      spyFindByDefaultCwd.mockRestore();
-      spyFindByPathPrefix.mockRestore();
-      spyScan.mockRestore();
-    });
-
-    test('throws EnvLeakError when .env contains sensitive keys and registered codebase has no consent', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: false,
-        default_cwd: '/workspace',
-      });
-      spyScan.mockReturnValueOnce({
-        path: '/workspace',
-        findings: [{ file: '.env', keys: ['ANTHROPIC_API_KEY'] }],
-      });
-
-      const consumeGenerator = async (): Promise<void> => {
-        for await (const _ of client.sendQuery('test', '/workspace')) {
-          // consume
-        }
-      };
-
-      await expect(consumeGenerator()).rejects.toThrow('Cannot run workflow');
-    });
-
-    test('skips scan entirely when cwd is not a registered codebase', async () => {
-      // Both lookups return null (default from beforeEach). Pre-spawn safety net
-      // is only for registered codebases; unregistered paths go through registerRepoAtPath.
-      spyScan.mockReturnValue({
-        path: '/workspace',
-        findings: [{ file: '.env', keys: ['ANTHROPIC_API_KEY'] }],
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-    });
-
-    test('skips scan when codebase has allow_env_keys: true', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: true,
-        default_cwd: '/workspace',
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-    });
-
-    test('proceeds without scanning when cwd has no registered codebase', async () => {
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyScan).not.toHaveBeenCalled();
-    });
-
-    test('uses prefix lookup for worktree paths when exact match returns null', async () => {
-      spyFindByDefaultCwd.mockResolvedValueOnce(null);
-      spyFindByPathPrefix.mockResolvedValueOnce({
-        id: 'codebase-1',
-        allow_env_keys: true,
-        default_cwd: '/workspace/source',
-      });
-
-      const chunks = [];
-      for await (const chunk of client.sendQuery('test', '/workspace/worktrees/feature')) {
-        chunks.push(chunk);
-      }
-
-      expect(spyFindByPathPrefix).toHaveBeenCalledWith('/workspace/worktrees/feature');
-      expect(spyScan).not.toHaveBeenCalled();
     });
   });
 });
