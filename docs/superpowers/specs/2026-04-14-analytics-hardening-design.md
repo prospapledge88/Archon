@@ -163,7 +163,7 @@ Update `packages/core/package.json` `scripts.test` to split `workflow-analytics.
 "test": "... && bun test src/db/workflow-analytics.test.ts && ..."
 ```
 
-No batch change needed for the route test — the server package test scripts already isolate each `api.*.test.ts` appropriately (verify during implementation).
+The route test requires an equivalent batch entry. The server package test script invokes each `api.*.test.ts` as its own `bun test` call, so append `&& bun test src/routes/api.analytics.test.ts` to the `packages/server/package.json` test script to match the existing convention.
 
 ## Validation
 
@@ -184,7 +184,7 @@ Three atomic commits on `feat/analytics-hardening`:
 
 1. `feat(web): extract useCostAnalytics hook` — hook file + two call-site swaps
 2. `fix(core): SQLite day-boundary filter in workflow-analytics queries` — helper + three query call sites
-3. `test(core,server): add workflow-analytics DB + route aggregator tests` — two test files + `packages/core/package.json` batch entry
+3. `test(core,server): add workflow-analytics DB + route aggregator tests` — two test files + batch entries in both `packages/core/package.json` and `packages/server/package.json`
 
 ## Rollback
 
