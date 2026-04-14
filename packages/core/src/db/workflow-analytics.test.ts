@@ -92,4 +92,93 @@ describe('workflow-analytics db', () => {
       expect(params).toEqual(['2026-04-14T00:00:00Z']);
     });
   });
+
+  describe('empty result', () => {
+    test('getCostByWorkflow returns [] when no rows', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      const result = await getCostByWorkflow('2026-04-14T00:00:00Z');
+      expect(result).toEqual([]);
+    });
+
+    test('getDailyCosts returns [] when no rows', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      const result = await getDailyCosts('2026-04-14T00:00:00Z');
+      expect(result).toEqual([]);
+    });
+
+    test('getAvgDuration returns 0 when avg_seconds is null', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([{ avg_seconds: null }]));
+      const result = await getAvgDuration('2026-04-14T00:00:00Z');
+      expect(result).toBe(0);
+    });
+
+    test('getAvgDuration returns 0 when result has no rows', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([]));
+      const result = await getAvgDuration('2026-04-14T00:00:00Z');
+      expect(result).toBe(0);
+    });
+
+    test('getAvgDuration returns 0 when avg_seconds is not finite', async () => {
+      mockQuery.mockResolvedValueOnce(createQueryResult([{ avg_seconds: 'not-a-number' }]));
+      const result = await getAvgDuration('2026-04-14T00:00:00Z');
+      expect(result).toBe(0);
+    });
+  });
+
+  describe('getAvgDuration clock-skew exclusion', () => {
+    test('SQL filters out rows where completed_at < started_at', async () => {
+      await getAvgDuration('2026-04-14T00:00:00Z');
+      const { sql } = getCallArgs(0);
+      expect(sql).toContain('completed_at >= started_at');
+    });
+
+    test('SQL filters out rows where completed_at IS NULL', async () => {
+      await getAvgDuration('2026-04-14T00:00:00Z');
+      const { sql } = getCallArgs(0);
+      expect(sql).toContain('completed_at IS NOT NULL');
+    });
+  });
+
+  describe('sort ordering', () => {
+    test('getCostByWorkflow sorts by cost_usd DESC', async () => {
+      await getCostByWorkflow('2026-04-14T00:00:00Z');
+      const { sql } = getCallArgs(0);
+      expect(sql).toMatch(/ORDER BY cost_usd DESC/i);
+    });
+
+    test('getDailyCosts sorts by date ASC', async () => {
+      await getDailyCosts('2026-04-14T00:00:00Z');
+      const { sql } = getCallArgs(0);
+      expect(sql).toMatch(/ORDER BY date ASC/i);
+    });
+  });
+
+  describe('type coercion', () => {
+    test('getCostByWorkflow coerces string count and cost to numbers', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([
+          { workflow_name: 'foo', status: 'completed', run_count: '5', cost_usd: '1.25' },
+        ])
+      );
+      const result = await getCostByWorkflow('2026-04-14T00:00:00Z');
+      expect(result[0]).toEqual({
+        workflow_name: 'foo',
+        status: 'completed',
+        run_count: 5,
+        cost_usd: 1.25,
+      });
+      expect(typeof result[0].run_count).toBe('number');
+      expect(typeof result[0].cost_usd).toBe('number');
+    });
+
+    test('getDailyCosts coerces string count and cost to numbers', async () => {
+      mockQuery.mockResolvedValueOnce(
+        createQueryResult([{ date: '2026-04-14', run_count: '3', cost_usd: '0.75' }])
+      );
+      const result = await getDailyCosts('2026-04-14T00:00:00Z');
+      expect(result[0]).toEqual({ date: '2026-04-14', run_count: 3, cost_usd: 0.75 });
+      expect(typeof result[0].run_count).toBe('number');
+      expect(typeof result[0].cost_usd).toBe('number');
+    });
+  });
 });
