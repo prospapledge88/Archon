@@ -22,6 +22,13 @@ const dailyCostEntrySchema = z.object({
   runs: z.number(),
 });
 
+const topFailingWorkflowSchema = z.object({
+  workflowName: z.string(),
+  failureRate: z.number(),
+  failedRuns: z.number(),
+  totalRuns: z.number(),
+});
+
 export const costAnalyticsResponseSchema = z
   .object({
     period: z.object({
@@ -37,5 +44,8 @@ export const costAnalyticsResponseSchema = z
     failedCostUsd: z.number(),
     byWorkflow: z.array(workflowCostEntrySchema),
     daily: z.array(dailyCostEntrySchema),
+    successRate: z.number(),
+    avgDurationSeconds: z.number(),
+    topFailingWorkflows: z.array(topFailingWorkflowSchema),
   })
   .openapi('CostAnalyticsResponse');
