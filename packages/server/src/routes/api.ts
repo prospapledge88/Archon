@@ -2549,13 +2549,18 @@ export function registerApiRoutes(
       from.setDate(from.getDate() - days);
       const sinceDate = from.toISOString();
 
-      const [workflowRows, dailyRows] = await Promise.all([
+      const [workflowRows, dailyRows, avgDurationSeconds] = await Promise.all([
         analyticsDb.getCostByWorkflow(sinceDate),
         analyticsDb.getDailyCosts(sinceDate),
+        analyticsDb.getAvgDuration(sinceDate),
       ]);
 
       // Aggregate by workflow name (rows are split by status)
-      const byWorkflowMap = new Map<string, { costUsd: number; runs: number }>();
+      // Now tracks success/failure counts per workflow for the health metrics.
+      const byWorkflowMap = new Map<
+        string,
+        { costUsd: number; runs: number; successRuns: number; failedRuns: number }
+      >();
       let totalCostUsd = 0;
       let totalRuns = 0;
       let successfulRuns = 0;
@@ -2567,13 +2572,17 @@ export function registerApiRoutes(
         const entry = byWorkflowMap.get(row.workflow_name) ?? {
           costUsd: 0,
           runs: 0,
+          successRuns: 0,
+          failedRuns: 0,
         };
         entry.costUsd += row.cost_usd;
         entry.runs += row.run_count;
         if (row.status === 'completed') {
+          entry.successRuns += row.run_count;
           successfulRuns += row.run_count;
           successCostUsd += row.cost_usd;
         } else {
+          entry.failedRuns += row.run_count;
           failedRuns += row.run_count;
           failedCostUsd += row.cost_usd;
         }
@@ -2597,6 +2606,26 @@ export function registerApiRoutes(
         runs: row.run_count,
       }));
 
+      // Health metrics: aggregate success rate and top failing workflows
+      const successRate = totalRuns > 0 ? successfulRuns / totalRuns : 0;
+
+      // Exclude workflows with < 3 total runs to avoid ranking noise
+      // (e.g., "1 of 1 failed = 100% failure rate" is misleading).
+      const MIN_RUNS_FOR_FAILURE_RANKING = 3;
+      const topFailingWorkflows = [...byWorkflowMap.entries()]
+        .map(([workflowName, data]) => {
+          const total = data.successRuns + data.failedRuns;
+          return {
+            workflowName,
+            failureRate: total > 0 ? data.failedRuns / total : 0,
+            failedRuns: data.failedRuns,
+            totalRuns: total,
+          };
+        })
+        .filter(wf => wf.totalRuns >= MIN_RUNS_FOR_FAILURE_RANKING && wf.failedRuns > 0)
+        .sort((a, b) => b.failureRate - a.failureRate)
+        .slice(0, 3);
+
       return c.json({
         period: { days, from: sinceDate, to: now.toISOString() },
         totalCostUsd: Math.round(totalCostUsd * 10000) / 10000,
@@ -2607,6 +2636,12 @@ export function registerApiRoutes(
         failedCostUsd: Math.round(failedCostUsd * 10000) / 10000,
         byWorkflow,
         daily,
+        successRate: Math.round(successRate * 10000) / 10000,
+        avgDurationSeconds: Math.round(avgDurationSeconds),
+        topFailingWorkflows: topFailingWorkflows.map(wf => ({
+          ...wf,
+          failureRate: Math.round(wf.failureRate * 10000) / 10000,
+        })),
       });
     } catch (error) {
       getLog().error({ err: error }, 'cost_analytics_failed');
