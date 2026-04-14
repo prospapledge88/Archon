@@ -57,22 +57,12 @@ mock.module('../utils/codex-binary-resolver', () => ({
 // Config mock with configurable return value
 const mockLoadConfig = mock(() =>
   Promise.resolve({
-    allowTargetRepoKeys: false,
     assistants: { codex: {} },
   })
 );
 
-// Mock db and config dependencies to prevent real DB access
-mock.module('../db/codebases', () => ({
-  findCodebaseByDefaultCwd: mock(() => Promise.resolve(null)),
-  findCodebaseByPathPrefix: mock(() => Promise.resolve(null)),
-}));
 mock.module('../config/config-loader', () => ({
   loadConfig: mockLoadConfig,
-}));
-mock.module('../utils/env-leak-scanner', () => ({
-  scanPathForSensitiveKeys: mock(() => ({ findings: [] })),
-  EnvLeakError: class extends Error {},
 }));
 
 import { CodexClient, resetCodexSingleton } from './codex';
@@ -92,7 +82,6 @@ describe('CodexClient binary mode resolution', () => {
     );
     mockLoadConfig.mockImplementation(() =>
       Promise.resolve({
-        allowTargetRepoKeys: false,
         assistants: { codex: {} },
       })
     );
@@ -163,7 +152,6 @@ describe('CodexClient binary mode resolution', () => {
 
   test('passes config codexBinaryPath to resolver', async () => {
     mockLoadConfig.mockResolvedValueOnce({
-      allowTargetRepoKeys: false,
       assistants: { codex: { codexBinaryPath: '/user/custom/codex' } },
     });
 
