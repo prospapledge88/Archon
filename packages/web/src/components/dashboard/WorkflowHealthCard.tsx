@@ -2,13 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Activity, CheckCircle2, Clock, TrendingDown } from 'lucide-react';
 import { getCostAnalytics } from '@/lib/api';
 import type { CostAnalytics } from '@/lib/api';
-
-function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${String(Math.round(seconds))}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = Math.round(seconds % 60);
-  return `${String(minutes)}m ${String(remainder)}s`;
-}
+import { formatDurationMs } from '@/lib/format';
 
 function formatPercent(decimal: number): string {
   return `${String(Math.round(decimal * 100))}%`;
@@ -27,7 +21,7 @@ function HealthBreakdown({ data }: { data: CostAnalytics }): React.ReactElement 
         </span>
         <span className="flex items-center gap-1.5 text-sm text-text-secondary">
           <Clock className="h-3.5 w-3.5" />
-          {formatDuration(data.avgDurationSeconds)} avg duration
+          {formatDurationMs(data.avgDurationSeconds * 1000)} avg duration
         </span>
         <span className="text-sm text-text-tertiary">
           {data.totalRuns} run{data.totalRuns !== 1 ? 's' : ''}
@@ -60,7 +54,7 @@ function HealthBreakdown({ data }: { data: CostAnalytics }): React.ReactElement 
 
 export function WorkflowHealthCard(): React.ReactElement | null {
   const { data, isLoading } = useQuery({
-    queryKey: ['cost-analytics'],
+    queryKey: ['cost-analytics', { days: 30 }],
     queryFn: () => getCostAnalytics(30),
     staleTime: 30_000,
   });

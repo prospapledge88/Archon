@@ -60,7 +60,7 @@ function CostBreakdown({ data }: { data: CostAnalytics }): React.ReactElement {
 
 export function CostSummaryCard(): React.ReactElement | null {
   const { data, isLoading } = useQuery({
-    queryKey: ['cost-analytics'],
+    queryKey: ['cost-analytics', { days: 30 }],
     queryFn: () => getCostAnalytics(30),
     staleTime: 30_000,
   });
