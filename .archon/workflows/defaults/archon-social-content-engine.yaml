@@ -1,0 +1,621 @@
+name: archon-social-content-engine
+description: |
+  Use when: PledgeUP needs daily social media draft content across Instagram, X/Twitter, and LinkedIn.
+  Triggers: Daily at 06:00 AEST via CronCreate, or manually with "daily social content", "generate drafts", "content calendar", "schedule posts", "social media pipeline", "draft content".
+  Does: Reads brand intelligence docs and post history, selects content pillar via day-of-week rotation, generates 9 drafts (3 channels x 3 options) using claude-sonnet-4-6 with PledgeUP voice, validates against banned-word list and platform specs, routes to Notion Content Calendar for human review, logs all drafts to post-history.
+  NOT for: Auto-publishing, image generation, platform API posting, engagement analytics, or any content that bypasses human approval.
+
+nodes:
+  - id: context-loader
+    prompt: |
+      You are assembling brand context for PledgeUP's daily social content generation.
+
+      Read ALL of the following files and compile their contents into a structured context document:
+
+      **Brand Intelligence (read in full):**
+      1. /Users/cjnv3/pledgeup-landing/brand/intelligence/voice-profile.md — tone spectrum, vocabulary allow/ban lists, platform adaptations, example phrases
+      2. /Users/cjnv3/pledgeup-landing/brand/intelligence/audience.md — primary persona "The Relapsed Self-Improver", pain hierarchy, desire hierarchy, language patterns
+      3. /Users/cjnv3/pledgeup-landing/brand/intelligence/positioning.md — 5 positioning angles, competitive landscape, white space
+
+      **Post History (last 14 days only):**
+      4. /Users/cjnv3/pledgeup-landing/brand/campaigns/social/post-history.md — filter to entries from the last 14 days. Extract: dates, channels, pillars used, hook summaries
+
+      **Published Post Examples (for voice reference):**
+      5. /Users/cjnv3/pledgeup-landing/brand/campaigns/social/instagram/published/_index.md — index of 22 published Instagram posts with pillar tags
+      6. /Users/cjnv3/pledgeup-landing/src/content/blog/_index.md — index of 6 blog posts with pillar tags
+
+      **Output a structured context artifact with these sections:**
+
+      ## VOICE PROFILE
+      [Full voice profile including tone spectrum, core personality traits (warm directness, grounded confidence, steady presence, honest encouragement, quiet conviction), vocabulary rules, platform-specific adaptations]
+
+      ## AUDIENCE
+      [Primary persona, pain points, desires, language patterns they respond to]
+
+      ## POSITIONING
+      [Key angles, tagline, competitive white space, brand promise]
+
+      ## BANNED WORDS
+      [Complete list extracted from voice-profile.md: fail, failed, streak, discipline, punishment, hustle, grind, smash, beast mode, accountability partner, optimise, empower, behind, falling behind, revolutionary, game-changing, don't give up, hack, solution, platform]
+
+      ## PLATFORM SPECS
+      - Instagram: Under 100 words caption, warmest tone, visual-first, community energy
+      - Twitter/X: Under 280 chars, punchiest, driest, Australian understatement
+      - LinkedIn: 150-250 words, expertise-forward, thought leadership, warm
+
+      ## RECENT POST HISTORY (last 14 days)
+      [Filtered entries from post-history.md — dates, channels, pillars, hooks used]
+
+      ## PUBLISHED VOICE EXAMPLES
+      [Sample posts from Instagram published index and blog index, grouped by pillar]
+    model: haiku
+    output_format:
+      type: object
+      properties:
+        voice_profile:
+          type: string
+          description: "Full voice profile content"
+        audience:
+          type: string
+          description: "Audience persona and language patterns"
+        positioning:
+          type: string
+          description: "Brand positioning angles and white space"
+        banned_words:
+          type: array
+          items:
+            type: string
+          description: "Complete banned word list"
+        platform_specs:
+          type: object
+          properties:
+            instagram:
+              type: string
+            twitter:
+              type: string
+            linkedin:
+              type: string
+        recent_history:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+              channel:
+                type: string
+              pillar:
+                type: string
+              hook_summary:
+                type: string
+        pillar_counts_14d:
+          type: object
+          description: "Count of posts per pillar in last 14 days"
+        voice_examples_by_pillar:
+          type: object
+          description: "Sample published posts grouped by pillar name"
+
+  - id: feedback-loader
+    prompt: |
+      You are loading performance feedback from previously generated PledgeUP social media drafts.
+      This data enables recursive learning — the content engine improves over time based on what worked.
+
+      **Step 1: Search for the Content Calendar database.**
+      Use mcp__claude_ai_Notion__notion-search to find "PledgeUP Content Calendar".
+
+      **Step 2: Fetch the database to get its data source ID.**
+      Use mcp__claude_ai_Notion__notion-fetch on the database ID.
+
+      **Step 3: Query for posts with feedback data.**
+      Use mcp__claude_ai_Notion__notion-search with the data source URL to find posts where:
+      - "Used" is checked (actually posted), OR
+      - "Quality Rating" has a value, OR
+      - "Likes" or "Comments" have values > 0
+
+      For each post with feedback, extract:
+      - Channel, Pillar, Hook, Draft Text (first 100 chars)
+      - Used (yes/no), Quality Rating, Likes count, Comments count, Notes
+
+      **Step 4: Compile a learning summary with these sections:**
+
+      ## TOP PERFORMERS
+      Posts rated "Great" or with highest engagement (likes + comments). What made them work?
+      List the hooks, angles, and patterns that performed well.
+
+      ## PATTERNS TO REPEAT
+      Common traits across high-rated posts: tone, length, hook style, pillar, channel.
+
+      ## PATTERNS TO AVOID
+      Common traits across "Weak"/"OK" rated posts or low engagement. What to do differently.
+
+      ## ENGAGEMENT BY PILLAR
+      Average likes/comments per pillar (if enough data exists).
+
+      ## ENGAGEMENT BY CHANNEL
+      Average likes/comments per channel (if enough data exists).
+
+      If the database doesn't exist yet or has no feedback data, output empty sections — the engine
+      will run without learning data on early runs and start learning once ratings come in.
+    model: haiku
+    allowed_tools:
+      - mcp__claude_ai_Notion__notion-search
+      - mcp__claude_ai_Notion__notion-fetch
+    output_format:
+      type: object
+      properties:
+        has_feedback:
+          type: boolean
+          description: "Whether any feedback data was found"
+        top_performers:
+          type: array
+          items:
+            type: object
+            properties:
+              channel:
+                type: string
+              pillar:
+                type: string
+              hook:
+                type: string
+              quality_rating:
+                type: string
+              likes:
+                type: integer
+              comments:
+                type: integer
+        patterns_to_repeat:
+          type: array
+          items:
+            type: string
+          description: "List of patterns/traits to repeat based on high performers"
+        patterns_to_avoid:
+          type: array
+          items:
+            type: string
+          description: "List of patterns/traits to avoid based on low performers"
+        engagement_by_pillar:
+          type: object
+          description: "Average engagement per pillar"
+        engagement_by_channel:
+          type: object
+          description: "Average engagement per channel"
+
+  - id: pillar-selector
+    depends_on: [context-loader]
+    prompt: |
+      You are selecting today's content pillar for PledgeUP social media.
+
+      **CRITICAL RULE — SAME-DAY DEDUPLICATION (non-negotiable):**
+      Check the recent post history below. If TODAY'S DATE already has entries for a pillar,
+      that pillar is BLOCKED — you MUST NOT select it. Pick the next pillar in the rotation
+      that has NOT been used today. If ALL 5 pillars have been used today, select the one
+      with the fewest entries today.
+
+      **Day-of-week rotation (deterministic baseline, used when no same-day conflict):**
+      - Monday: social-tracking
+      - Tuesday: comparisons
+      - Wednesday: anti-streak
+      - Thursday: accountability
+      - Friday: activity-specific
+      - Saturday: social-tracking
+      - Sunday: accountability
+
+      **Fallback rotation order (when the default is blocked):**
+      comparisons → activity-specific → social-tracking → accountability → anti-streak
+      (ordered by underrepresentation in the existing corpus)
+
+      **Today's date:** Use the current date (YYYY-MM-DD format) to check for same-day entries.
+
+      **Underrepresentation weighting (secondary to same-day dedup):**
+      Review the pillar counts from the last 14 days (from context-loader output):
+      $<context-loader>.output.pillar_counts_14d
+
+      Recent post history:
+      $<context-loader>.output.recent_history
+
+      The 5 pillars are: social-tracking, comparisons, anti-streak, accountability, activity-specific.
+
+      **Selection algorithm:**
+      1. Get today's date
+      2. Filter post history for today's entries → extract which pillars are already used today
+      3. If the day-of-week default pillar is NOT in today's used list → select it
+      4. If it IS used → walk the fallback rotation order and pick the first unused pillar
+      5. Among unused candidates, prefer those with fewer entries in the last 14 days
+
+      **Voice examples for selected pillar:**
+      From context-loader: $<context-loader>.output.voice_examples_by_pillar
+
+      Select 2-3 example posts from the chosen pillar to serve as voice references for the draft generator.
+
+      **Output:**
+      - selected_pillar: the chosen pillar name
+      - rationale: why this pillar was selected (day-of-week default or underrepresentation override)
+      - voice_examples: 2-3 published post excerpts from this pillar for tone reference
+    model: haiku
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        selected_pillar:
+          type: string
+          enum: [social-tracking, comparisons, anti-streak, accountability, activity-specific]
+        rationale:
+          type: string
+        voice_examples:
+          type: array
+          items:
+            type: string
+
+  - id: draft-generator
+    depends_on: [context-loader, pillar-selector, feedback-loader]
+    model: sonnet
+    prompt: |
+      You are a PledgeUP brand voice specialist generating daily social media drafts.
+
+      **Brand Voice Traits:** warm directness, grounded confidence, steady presence, honest encouragement, quiet conviction. Australian understatement. Never preachy, never guilt-inducing. The Friend Mechanism — progress through genuine human connection, not willpower or streaks.
+
+      **Voice Profile:**
+      $<context-loader>.output.voice_profile
+
+      **Audience:**
+      $<context-loader>.output.audience
+
+      **Positioning:**
+      $<context-loader>.output.positioning
+
+      **Today's Pillar:** $<pillar-selector>.output.selected_pillar
+      **Pillar Rationale:** $<pillar-selector>.output.rationale
+
+      **Voice Examples (from published posts in this pillar):**
+      $<pillar-selector>.output.voice_examples
+
+      ---
+
+      ## RECURSIVE LEARNING — what has worked before
+
+      Has feedback data: $<feedback-loader>.output.has_feedback
+
+      **Top performing posts (rated "Great" or high engagement):**
+      $<feedback-loader>.output.top_performers
+
+      **Patterns to REPEAT (do more of this):**
+      $<feedback-loader>.output.patterns_to_repeat
+
+      **Patterns to AVOID (do less of this):**
+      $<feedback-loader>.output.patterns_to_avoid
+
+      **Engagement by pillar:**
+      $<feedback-loader>.output.engagement_by_pillar
+
+      **Engagement by channel:**
+      $<feedback-loader>.output.engagement_by_channel
+
+      If feedback data exists, actively steer your drafts toward the patterns that performed well
+      and away from patterns that didn't. Specifically:
+      - Mirror the hook style, length, and tone of top-rated posts
+      - Use similar angles and framing approaches that got high engagement
+      - Avoid angles, tones, or structures from posts rated "Weak" or "OK"
+      - If a particular channel performs better with certain approaches, lean into those
+
+      If no feedback data exists yet, generate purely from the brand docs and voice examples.
+
+      ---
+
+      **BANNED WORDS — do NOT use any of these:**
+      fail, failed, streak, discipline, punishment, hustle, grind, smash, beast mode, accountability partner, optimise, empower, behind, falling behind, revolutionary, game-changing, don't give up, hack, solution, platform
+
+      **Locale:** en-AU throughout. Use Australian English spelling: colour, organised, realise, behaviour, favour, centre, honour, programme, etc. "mate" is acceptable in Australian-specific casual content.
+
+      ---
+
+      Generate 3 draft options for EACH of these 3 channels (9 drafts total):
+
+      ## INSTAGRAM (3 options)
+      - Under 100 words per caption
+      - Warmest tone, conversational, community energy
+      - Each option should take a different angle on today's pillar
+      - Include a hook (opening line that stops the scroll)
+      - Include 5-8 relevant hashtags per option (e.g. #habittracking #accountability #pledgeup #showup plus pillar-specific)
+
+      ## TWITTER/X (3 options)
+      - Under 280 characters each
+      - Punchiest, driest, Australian understatement
+      - Each option should take a different angle on today's pillar
+      - 0-2 hashtags maximum (avoid hashtag spam per voice profile)
+
+      ## LINKEDIN (3 options)
+      - 150-250 words each
+      - Expertise-forward, thought leadership, warm but professional
+      - Each option should take a different angle on today's pillar
+      - Include a compelling hook (first sentence visible before "see more")
+      - Include 3-5 hashtags per option
+
+      **For each draft provide:**
+      - hook: the opening line/hook summary (one sentence)
+      - body: the full draft text
+      - hashtags: comma-separated list
+      - word_count: (Instagram and LinkedIn) or char_count: (Twitter)
+    output_format:
+      type: object
+      properties:
+        pillar:
+          type: string
+        date:
+          type: string
+        instagram:
+          type: array
+          items:
+            type: object
+            properties:
+              option:
+                type: integer
+              hook:
+                type: string
+              body:
+                type: string
+              hashtags:
+                type: string
+              word_count:
+                type: integer
+        twitter:
+          type: array
+          items:
+            type: object
+            properties:
+              option:
+                type: integer
+              hook:
+                type: string
+              body:
+                type: string
+              hashtags:
+                type: string
+              char_count:
+                type: integer
+        linkedin:
+          type: array
+          items:
+            type: object
+            properties:
+              option:
+                type: integer
+              hook:
+                type: string
+              body:
+                type: string
+              hashtags:
+                type: string
+              word_count:
+                type: integer
+    allowed_tools: []
+
+  - id: quality-gate
+    depends_on: [draft-generator]
+    prompt: |
+      You are a quality assurance checker for PledgeUP social media drafts.
+
+      **Drafts to validate (9 total):**
+      $<draft-generator>.output
+
+      **Validation Rules:**
+
+      1. **BANNED WORDS (hard fail if any are present, case-insensitive):**
+         fail, failed, streak, discipline, punishment, hustle, grind, smash, beast mode, accountability partner, optimise, empower, behind, falling behind, revolutionary, game-changing, don't give up, hack, solution, platform
+
+      2. **CHARACTER/WORD COUNT SPECS:**
+         - Instagram: maximum 100 words per caption
+         - Twitter/X: maximum 280 characters per tweet
+         - LinkedIn: 150-250 words (both minimum AND maximum)
+
+      3. **AUSTRALIAN ENGLISH CHECK:**
+         - Must use -our endings (colour, behaviour, favour, honour)
+         - Must use -ise endings (realise, organised, recognise)
+         - Must use -re endings (centre, theatre)
+         - Flag any Americanisms (color, behavior, realize, organize, center)
+
+      4. **BRAND VOICE CHECK:**
+         - No preachy or guilt-inducing language
+         - No boastful claims (tall poppy awareness)
+         - Warm, not corporate
+         - Grounded, not hype-driven
+
+      **For each of the 9 drafts, output:**
+      - channel: Instagram/Twitter/LinkedIn
+      - option: 1/2/3
+      - passed: true/false
+      - violations: list of specific violations found (empty if passed)
+      - violation_type: banned_word / word_count / char_count / spelling / voice
+
+      **Summary:**
+      - total_passed: count of drafts that passed all checks
+      - total_failed: count of drafts that failed
+      - failed_drafts: list of {channel, option, violations} for any that failed
+
+      If any drafts fail, rewrite ONLY the failed drafts to fix the violations while preserving the original intent and voice. Output the corrected versions alongside the validation results.
+    model: haiku
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        total_passed:
+          type: integer
+        total_failed:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              channel:
+                type: string
+              option:
+                type: integer
+              passed:
+                type: boolean
+              violations:
+                type: array
+                items:
+                  type: string
+        corrected_drafts:
+          type: object
+          description: "Full set of 9 drafts with any failed ones replaced by corrected versions"
+          properties:
+            pillar:
+              type: string
+            date:
+              type: string
+            instagram:
+              type: array
+              items:
+                type: object
+                properties:
+                  option:
+                    type: integer
+                  hook:
+                    type: string
+                  body:
+                    type: string
+                  hashtags:
+                    type: string
+                  word_count:
+                    type: integer
+            twitter:
+              type: array
+              items:
+                type: object
+                properties:
+                  option:
+                    type: integer
+                  hook:
+                    type: string
+                  body:
+                    type: string
+                  hashtags:
+                    type: string
+                  char_count:
+                    type: integer
+            linkedin:
+              type: array
+              items:
+                type: object
+                properties:
+                  option:
+                    type: integer
+                  hook:
+                    type: string
+                  body:
+                    type: string
+                  hashtags:
+                    type: string
+                  word_count:
+                    type: integer
+
+  - id: review-router
+    depends_on: [quality-gate]
+    prompt: |
+      You are routing PledgeUP social media drafts to Notion for human review.
+
+      **Validated drafts (9 total, with any corrections applied):**
+      $<quality-gate>.output.corrected_drafts
+
+      **Notion Setup:**
+      - Parent page ID: 33b98b7482d48188a834d8ff92d2d58b (Second Brain)
+      - Database name: "PledgeUP Content Calendar"
+
+      **Step 1: Check if database exists.**
+      Use mcp__claude_ai_Notion__notion-search to search for "PledgeUP Content Calendar" database.
+
+      **Step 2: If database does NOT exist, create it.**
+      Use mcp__claude_ai_Notion__notion-create-database with:
+      - Parent page ID: 33b98b7482d48188a834d8ff92d2d58b
+      - Title: "PledgeUP Content Calendar"
+      - Properties:
+        * "Date" — type: date
+        * "Channel" — type: select, options: ["Instagram", "Twitter", "LinkedIn"]
+        * "Pillar" — type: select, options: ["social-tracking", "comparisons", "anti-streak", "accountability", "activity-specific"]
+        * "Status" — type: select, options: ["Draft", "Approved", "Posted"]
+        * "Hook" — type: rich_text
+        * "Draft Text" — type: rich_text
+        * "Hashtags" — type: rich_text
+
+      **Step 3: Create 9 pages in the database.**
+      Use mcp__claude_ai_Notion__notion-create-pages to create one page per draft:
+
+      **Date calculation (CRITICAL — do not reason about timezones yourself):**
+      Before creating any Notion pages, run this Bash command ONCE to get today's AEST/AEDT date:
+        TZ='Australia/Sydney' date +%Y-%m-%d
+      Use the exact output (format YYYY-MM-DD) as the "Date" value for all 9 entries.
+      The TZ environment variable handles AEST/AEDT daylight-saving automatically; do not add or subtract hours.
+
+      For each of the 3 Instagram drafts:
+      - Date: today's date in AEST (see calculation above)
+      - Channel: "Instagram"
+      - Pillar: the selected pillar from the drafts
+      - Status: "Draft"
+      - Hook: the hook text
+      - Draft Text: the full body text
+      - Hashtags: the hashtag list
+
+      For each of the 3 Twitter/X drafts:
+      - Date: today's date in AEST (see calculation above)
+      - Channel: "Twitter"
+      - Pillar: the selected pillar
+      - Status: "Draft"
+      - Hook: the hook text
+      - Draft Text: the full body text
+      - Hashtags: the hashtag list (if any)
+
+      For each of the 3 LinkedIn drafts:
+      - Date: today's date in AEST (see calculation above)
+      - Channel: "LinkedIn"
+      - Pillar: the selected pillar
+      - Status: "Draft"
+      - Hook: the hook text
+      - Draft Text: the full body text
+      - Hashtags: the hashtag list
+
+      All 9 entries must have Status = "Draft". The founder will change Status to "Approved" or "Posted" manually after review.
+
+      **Output:** Confirm all 9 pages were created and list their Notion page URLs.
+    allowed_tools:
+      - Bash
+      - mcp__claude_ai_Notion__notion-search
+      - mcp__claude_ai_Notion__notion-create-database
+      - mcp__claude_ai_Notion__notion-create-pages
+      - mcp__claude_ai_Notion__notion-fetch
+
+  - id: history-logger
+    depends_on: [review-router]
+    prompt: |
+      You are logging today's PledgeUP social media drafts to the post-history file.
+
+      **Validated drafts:**
+      $<quality-gate>.output.corrected_drafts
+
+      **File to append to:** /Users/cjnv3/pledgeup-landing/brand/campaigns/social/post-history.md
+
+      **Schema:** date | channel | pillar | hook_summary | status
+
+      Append exactly 9 new entries (one per draft) to the file.
+
+      **Date calculation (CRITICAL — do not reason about timezones yourself):**
+      Before writing, run this Bash command ONCE to get today's AEST/AEDT date:
+        TZ='Australia/Sydney' date +%Y-%m-%d
+      Use the exact output (format YYYY-MM-DD) as the date column for all 9 rows.
+      The TZ environment variable handles AEST/AEDT daylight-saving automatically; do not add or subtract hours.
+
+      Format each entry as a pipe-separated row:
+
+      For each Instagram draft (3 entries):
+      YYYY-MM-DD | Instagram | [pillar] | [hook summary from draft] | draft
+
+      For each Twitter draft (3 entries):
+      YYYY-MM-DD | Twitter | [pillar] | [hook summary from draft] | draft
+
+      For each LinkedIn draft (3 entries):
+      YYYY-MM-DD | LinkedIn | [pillar] | [hook summary from draft] | draft
+
+      Read the existing file first, then append the 9 new rows at the end (after any existing entries). Do not overwrite existing content.
+
+      **Output:** Confirm 9 entries were appended and show the entries that were added.
+    denied_tools: [Edit]
