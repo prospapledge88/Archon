@@ -62,14 +62,14 @@ mock.module('../handlers/command-handler', () => ({
   })),
 }));
 
-mock.module('../clients/factory', () => ({
-  getAssistantClient: mock(() => null),
+mock.module('@archon/providers', () => ({
+  getAgentProvider: mock(() => null),
 }));
 
 mock.module('../workflows/store-adapter', () => ({
   createWorkflowDeps: mock(() => ({
     store: {},
-    getAssistantClient: () => ({}),
+    getAgentProvider: () => ({}),
     loadConfig: async () => ({}),
   })),
 }));

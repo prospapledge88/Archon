@@ -19,6 +19,8 @@ export const SSE_BASE_URL = import.meta.env.DEV
   ? `http://${window.location.hostname}:${apiPort}`
   : '';
 
+export { getCodebaseInput } from '@/lib/codebase-input';
+
 export interface ConversationResponse {
   id: string;
   platform_type: string;
@@ -67,6 +69,45 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
     throw error;
   }
   return res.json() as Promise<T>;
+}
+
+// Providers
+export interface ProviderInfo {
+  id: string;
+  displayName: string;
+  capabilities: Record<string, boolean>;
+  builtIn: boolean;
+}
+
+export type ProviderDefaults = Record<string, unknown>;
+
+export interface SafeConfigResponse {
+  botName: string;
+  assistant: string;
+  assistants: Record<string, ProviderDefaults>;
+  streaming: {
+    telegram: 'stream' | 'batch';
+    discord: 'stream' | 'batch';
+    slack: 'stream' | 'batch';
+  };
+  concurrency: {
+    maxConversations: number;
+  };
+  defaults: {
+    copyDefaults: boolean;
+    loadDefaultCommands: boolean;
+    loadDefaultWorkflows: boolean;
+  };
+}
+
+export interface UpdateAssistantConfigBody {
+  assistant?: string;
+  assistants?: Record<string, ProviderDefaults>;
+}
+
+export async function listProviders(): Promise<ProviderInfo[]> {
+  const data = await fetchJSON<{ providers: ProviderInfo[] }>('/api/providers');
+  return data.providers;
 }
 
 // Conversations
@@ -423,13 +464,9 @@ export async function listCommands(cwd?: string): Promise<CommandEntry[]> {
   return result.commands;
 }
 
-export type SafeConfigResponse = components['schemas']['SafeConfig'];
-
 export async function getConfig(): Promise<{ config: SafeConfigResponse; database: string }> {
   return fetchJSON('/api/config');
 }
-
-export type UpdateAssistantConfigBody = components['schemas']['UpdateAssistantConfigBody'];
 
 export async function updateAssistantConfig(
   body: UpdateAssistantConfigBody

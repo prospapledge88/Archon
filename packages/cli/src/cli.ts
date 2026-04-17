@@ -43,6 +43,10 @@ if (!process.env.CLAUDE_API_KEY && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
 
 // DATABASE_URL is no longer required - SQLite will be used as default
 
+// Bootstrap provider registry before any provider lookups
+import { registerBuiltinProviders } from '@archon/providers';
+registerBuiltinProviders();
+
 // Import commands after dotenv is loaded
 import { versionCommand } from './commands/version';
 import {
@@ -76,6 +80,7 @@ import {
   checkForUpdate,
   BUNDLED_IS_BINARY,
   BUNDLED_VERSION,
+  shutdownTelemetry,
 } from '@archon/paths';
 import * as git from '@archon/git';
 
@@ -570,6 +575,9 @@ async function main(): Promise<number> {
     }
     return 1;
   } finally {
+    // Flush queued telemetry events before the CLI process exits.
+    // Short-lived CLI commands lose buffered events if shutdown() is skipped.
+    await shutdownTelemetry();
     // Always close database connection
     await closeDb();
   }
