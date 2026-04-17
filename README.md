@@ -171,6 +171,22 @@ irm https://archon.diy/install.ps1 | iex
 brew install coleam00/archon/archon
 ```
 
+> **Compiled binaries need a `CLAUDE_BIN_PATH`.** The quick-install binaries
+> don't bundle Claude Code. Install it separately, then point Archon at it:
+>
+> ```bash
+> # macOS / Linux / WSL
+> curl -fsSL https://claude.ai/install.sh | bash
+> export CLAUDE_BIN_PATH="$HOME/.local/bin/claude"
+>
+> # Windows (PowerShell)
+> irm https://claude.ai/install.ps1 | iex
+> $env:CLAUDE_BIN_PATH = "$env:USERPROFILE\.local\bin\claude.exe"
+> ```
+>
+> Or set `assistants.claude.claudeBinaryPath` in `~/.archon/config.yaml`.
+> The Docker image ships Claude Code pre-installed. See [AI Assistants → Binary path configuration](https://archon.diy/docs/getting-started/ai-assistants/#binary-path-configuration-compiled-binaries-only) for details.
+
 ### Start Using Archon
 
 Once you've completed either setup path, go to your project and start working:
@@ -298,6 +314,23 @@ Full documentation is available at **[archon.diy](https://archon.diy)**.
 | [Deployment](https://archon.diy/deployment/) | Docker, VPS, production setup |
 | [Architecture](https://archon.diy/reference/architecture/) | System design and internals |
 | [Troubleshooting](https://archon.diy/reference/troubleshooting/) | Common issues and fixes |
+
+## Telemetry
+
+Archon sends a single anonymous event — `workflow_invoked` — each time a workflow starts, so maintainers can see which workflows get real usage and prioritize accordingly. **No PII, ever.**
+
+**What's collected:** the workflow name, the workflow description (both authored by you in YAML), the platform that triggered it (`cli`, `web`, `slack`, etc.), the Archon version, and a random install UUID stored at `~/.archon/telemetry-id`. Nothing else.
+
+**What's *not* collected:** your code, prompts, messages, git remotes, file paths, usernames, tokens, AI output, workflow node details — none of it.
+
+**Opt out:** set any of these in your environment:
+
+```bash
+ARCHON_TELEMETRY_DISABLED=1
+DO_NOT_TRACK=1        # de facto standard honored by Astro, Bun, Prisma, Nuxt, etc.
+```
+
+Self-host PostHog or use a different project by setting `POSTHOG_API_KEY` and `POSTHOG_HOST`.
 
 ## Contributing
 

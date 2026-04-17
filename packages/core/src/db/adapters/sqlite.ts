@@ -236,7 +236,6 @@ export class SqliteAdapter implements IDatabase {
         default_cwd TEXT NOT NULL,
         default_branch TEXT DEFAULT 'main',
         ai_assistant_type TEXT DEFAULT 'claude',
-        allow_env_keys INTEGER DEFAULT 0,
         commands TEXT DEFAULT '{}',
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now'))

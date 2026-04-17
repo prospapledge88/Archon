@@ -3,3 +3,9 @@ worktree:
 
 docs:
   path: packages/docs-web/src/content/docs
+
+schedules:
+  - workflow: archon-social-content-engine
+    project: prospapledge88/pledgeup-landing
+    cron: "3 6 * * *"
+    description: "Daily PledgeUP social content drafts at 06:03 AEST"
