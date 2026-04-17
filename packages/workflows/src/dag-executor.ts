@@ -6,7 +6,7 @@
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
 import { readFile } from 'fs/promises';
-import { resolve, isAbsolute, join } from 'path';
+import { resolve, join } from 'path';
 import { execFileAsync } from '@archon/git';
 import { discoverScripts } from './script-discovery';
 import type {
