@@ -2246,6 +2246,17 @@ export interface components {
       };
       mcp?: string;
       skills?: string[];
+      agents?: {
+        [key: string]: {
+          description: string;
+          prompt: string;
+          model?: string;
+          tools?: string[];
+          disallowedTools?: string[];
+          skills?: string[];
+          maxTurns?: number;
+        };
+      };
       /** @enum {string} */
       effort?: 'low' | 'medium' | 'high' | 'max';
       thinking?:

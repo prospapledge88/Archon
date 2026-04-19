@@ -22,6 +22,7 @@ function makeMockProvider(id: string): IAgentProvider {
       mcp: false,
       hooks: false,
       skills: false,
+      agents: false,
       toolRestrictions: false,
       structuredOutput: false,
       envInjection: false,
