@@ -402,6 +402,28 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
       getLog().warn({ filename, value: raw.tags }, 'invalid_tags_block_ignored');
     }
 
+    // Parse workflow-level worktree policy. Same warn-and-ignore pattern used
+    // for `interactive` / `modelReasoningEffort` — invalid values are dropped
+    // rather than rejected, so a typo in one workflow doesn't nuke the whole
+    // discovery pass. Only `worktree.enabled` is recognised today.
+    let worktreePolicy: { enabled?: boolean } | undefined;
+    if (raw.worktree !== undefined) {
+      if (
+        typeof raw.worktree === 'object' &&
+        raw.worktree !== null &&
+        !Array.isArray(raw.worktree)
+      ) {
+        const rawEnabled = (raw.worktree as Record<string, unknown>).enabled;
+        if (typeof rawEnabled === 'boolean') {
+          worktreePolicy = { enabled: rawEnabled };
+        } else if (rawEnabled !== undefined) {
+          getLog().warn({ filename, value: rawEnabled }, 'invalid_worktree_enabled_value_ignored');
+        }
+      } else {
+        getLog().warn({ filename, value: raw.worktree }, 'invalid_worktree_block_ignored');
+      }
+    }
+
     return {
       workflow: {
         name: raw.name,
@@ -415,6 +437,7 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
         ...(mutatesCheckout !== undefined ? { mutates_checkout: mutatesCheckout } : {}),
         ...(tags !== undefined ? { tags } : {}),
         nodes: dagNodes,
+        ...(worktreePolicy ? { worktree: worktreePolicy } : {}),
       },
       error: null,
     };
