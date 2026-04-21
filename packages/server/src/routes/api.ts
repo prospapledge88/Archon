@@ -821,6 +821,7 @@ const getHealthRoute = createRoute({
               runningWorkflows: z.number(),
               version: z.string().optional(),
               is_docker: z.boolean(),
+              activePlatforms: z.array(z.string()).optional(),
             })
             .openapi('HealthResponse'),
         },
@@ -868,7 +869,8 @@ const getCostAnalyticsRoute = createRoute({
 export function registerApiRoutes(
   app: OpenAPIHono,
   webAdapter: WebAdapter,
-  lockManager: ConversationLockManager
+  lockManager: ConversationLockManager,
+  activePlatforms?: readonly string[]
 ): void {
   function apiError(
     c: Context,
@@ -2675,6 +2677,7 @@ export function registerApiRoutes(
       runningWorkflows: runningWorkflowRows.length,
       version: appVersion,
       is_docker: isDocker(),
+      activePlatforms: activePlatforms ? [...activePlatforms] : ['Web'],
     });
   });
 
