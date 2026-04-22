@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bumped transitive `axios` to `^1.15.0` via root `overrides` to clear CVE-2025-62718** (NO_PROXY bypass via hostname normalization → potential SSRF). Archon pulls `axios` transitively through `@slack/bolt` and `@slack/web-api`; both semver ranges (`^1.12.0` and `^1.13.5`) accept the override cleanly, so no API surface changes. Credits @stefans71 for identifying and reporting the vulnerability in #1153. Closes #1053.
 - **Server startup no longer marks actively-running workflows as failed.** The `failOrphanedRuns()` call has been removed from `packages/server/src/index.ts` to match the CLI precedent (`packages/cli/src/cli.ts:256-258`). Per the new CLAUDE.md principle "No Autonomous Lifecycle Mutation Across Process Boundaries", a stuck `running` row is now transitioned explicitly by the user: via the per-row Cancel/Abandon buttons on the dashboard workflow card, or `archon workflow abandon <run-id>` from the CLI. (`archon workflow cleanup` is a separate command that deletes OLD terminal runs for disk hygiene — it does not handle stuck `running` rows.) Closes #1216.
 
 ### Changed
