@@ -2176,9 +2176,12 @@ async function executeApprovalNode(
     // Fall through to re-pause at the approval gate
   }
 
-  // Standard approval gate — send message and pause
+  // Standard approval gate — send message and pause.
+  // Resolve $nodeId.output[.field] references so the human sees concrete values
+  // (parity with prompt/bash/loop/cancel nodes, which all run the same substitution).
+  const renderedMessage = substituteNodeOutputRefs(node.approval.message, nodeOutputs);
   const approvalMsg =
-    `⏸ **Approval required**: ${node.approval.message}\n\n` +
+    `⏸ **Approval required**: ${renderedMessage}\n\n` +
     `Run ID: \`${workflowRun.id}\`\n` +
     `Approve: \`/workflow approve ${workflowRun.id}\` | Reject: \`/workflow reject ${workflowRun.id}\``;
   await safeSendMessage(platform, conversationId, approvalMsg, msgContext);
@@ -2188,7 +2191,7 @@ async function executeApprovalNode(
       workflow_run_id: workflowRun.id,
       event_type: 'approval_requested',
       step_name: node.id,
-      data: { message: node.approval.message },
+      data: { message: renderedMessage },
     })
     .catch((err: Error) => {
       getLog().error(
@@ -2198,7 +2201,7 @@ async function executeApprovalNode(
     });
 
   await deps.store.pauseWorkflowRun(workflowRun.id, {
-    message: node.approval.message,
+    message: renderedMessage,
     nodeId: node.id,
     type: 'approval',
     captureResponse: node.approval.capture_response,
@@ -2210,7 +2213,7 @@ async function executeApprovalNode(
     type: 'approval_pending',
     runId: workflowRun.id,
     nodeId: node.id,
-    message: node.approval.message,
+    message: renderedMessage,
   });
 
   // Return completed — the between-layer status check will see 'paused' and break.
