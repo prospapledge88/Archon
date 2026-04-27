@@ -1640,6 +1640,10 @@ async function executeLoopNode(
       // Build prompt — substituteWorkflowVariables throws if $BASE_BRANCH referenced but empty
       // Pass loopUserInput on the first resumed iteration; '' on all others (non-interactive
       // or subsequent iterations) so $LOOP_USER_INPUT substitutes to empty string explicitly.
+      // $LOOP_PREV_OUTPUT carries the previous iteration's cleaned output and is empty on
+      // the first iteration (no prior output exists). Across an interactive resume, the
+      // executor starts a fresh `lastIterationOutput` variable, so the first iteration of
+      // the resume also receives an empty $LOOP_PREV_OUTPUT.
       const { prompt: substitutedPrompt } = substituteWorkflowVariables(
         loop.prompt,
         workflowRun.id,
@@ -1650,7 +1654,8 @@ async function executeLoopNode(
         issueContext,
         i === startIteration ? loopUserInput : '',
         undefined, // rejectionReason
-        projectKnowledge
+        projectKnowledge,
+        i === startIteration ? '' : lastIterationOutput
       );
       const finalPrompt = substituteNodeOutputRefs(substitutedPrompt, nodeOutputs);
 
