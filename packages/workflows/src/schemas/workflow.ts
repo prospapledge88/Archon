@@ -47,6 +47,7 @@ export const workflowBaseSchema = z.object({
    * Defaults to `true` (safe: serialize runs on the same path).
    */
   mutates_checkout: z.boolean().optional(),
+  tags: z.array(z.string().min(1)).optional(),
 });
 
 export type WorkflowBase = z.infer<typeof workflowBaseSchema>;

@@ -120,6 +120,10 @@ model: sonnet
 modelReasoningEffort: medium     # Codex only
 webSearchMode: live              # Codex only
 interactive: true                # Web only: run in foreground instead of background
+tags: [GitLab, Review]           # Optional: explicit Web UI filter tags. Overrides the
+                                 #   keyword-based tag inference. An empty list (`tags: []`)
+                                 #   suppresses inference and shows no tags. Omit to fall
+                                 #   back to inferred tags (the default).
 
 # Required for DAG-based
 nodes:
