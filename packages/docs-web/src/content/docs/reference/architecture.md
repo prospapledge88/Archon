@@ -380,6 +380,7 @@ export class YourAssistantProvider implements IAgentProvider {
 **3. Register in factory:** `packages/providers/src/factory.ts`
 
 ```typescript
+<<<<<<< HEAD
 import { YourAssistantProvider } from './your-assistant';
 
 export function getAgentProvider(type: string): IAgentProvider {
@@ -392,6 +393,21 @@ export function getAgentProvider(type: string): IAgentProvider {
       return new YourAssistantProvider();
     default:
       throw new Error(`Unknown provider type: ${type}`);
+=======
+export function registerBuiltinProviders(): void {
+  const builtins: ProviderRegistration[] = [
+    {
+      id: 'your-assistant',
+      displayName: 'Your Assistant',
+      factory: () => new YourAssistantProvider(),
+      capabilities: YOUR_ASSISTANT_CAPABILITIES,
+      builtIn: true,
+    },
+    // ...existing entries
+  ];
+  for (const entry of builtins) {
+    if (!registry.has(entry.id)) registry.set(entry.id, entry);
+>>>>>>> bf1f471e (refactor(workflows): trust the SDK for model validation (#1463))
   }
 }
 ```
