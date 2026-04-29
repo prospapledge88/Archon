@@ -158,12 +158,20 @@ nodes:
       2. The `description:` MUST follow the "Use when / Triggers / Does / NOT for" pattern
       3. Every node MUST have a unique kebab-case `id`
       4. Use `depends_on` to define execution order
-      5. Use `bash` nodes for deterministic operations (file checks, git commands, installs)
-      6. Use `prompt` nodes for AI reasoning tasks
-      7. Use `output_format` on prompt nodes when downstream nodes need structured data
-      8. Use `allowed_tools: []` on classification/analysis nodes that don't need tools
-      9. Use `denied_tools: [Edit, Bash]` when a node should only use Write (not edit existing files)
-      10. Prefer `model: haiku` for simple classification tasks to save cost
+      5. Use `bash` nodes for deterministic shell operations (file checks, git commands, installs)
+      6. Use `script` nodes for typed data transforms (TypeScript JSON parsing, Python with deps)
+         — stdout is captured as output, stderr is forwarded as a warning.
+         `$nodeId.output` is NOT shell-quoted in script bodies.
+         - **TypeScript/bun**: assign directly — `const data = $nodeId.output;`
+           (JSON is valid JS expression syntax; avoid String.raw — it breaks on backticks)
+         - **Python/uv**: use json.loads — `import json; data = json.loads("""$nodeId.output""")`
+         Never interpolate into shell syntax.
+      7. Use `prompt` nodes for AI reasoning tasks
+      8. Use `approval` nodes to pause for human review at risky gates (plan→execute boundary, destructive actions)
+      9. Use `output_format` on prompt nodes when downstream nodes need structured data
+      10. Use `allowed_tools: []` on classification/analysis nodes that don't need tools
+      11. Use `denied_tools: [Edit, Bash]` when a node should only use Write (not edit existing files)
+      12. Prefer `model: haiku` for simple classification tasks to save cost
 
       ## Output
 
