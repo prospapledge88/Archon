@@ -10,10 +10,10 @@ import {
   generateEnvContent,
   generateWebhookSecret,
   spawnTerminalWithSetup,
-  copyArchonSkill,
   detectClaudeExecutablePath,
 } from './setup';
 import * as setupModule from './setup';
+import { copyArchonSkill } from './skill';
 
 // Test directory for file operations
 const TEST_DIR = join(tmpdir(), 'archon-setup-test-' + Date.now());
