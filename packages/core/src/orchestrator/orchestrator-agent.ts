@@ -25,7 +25,7 @@ import { formatToolCall } from '@archon/workflows/utils/tool-formatter';
 import { classifyAndFormatError } from '../utils/error-formatter';
 import { toError } from '../utils/error';
 import { getAgentProvider, getProviderCapabilities } from '@archon/providers';
-import { getArchonHome, getArchonWorkspacesPath, ensureArchonWorkspacesPath } from '@archon/paths';
+import { getArchonWorkspacesPath, ensureArchonWorkspacesPath } from '@archon/paths';
 import { syncArchonToWorktree } from '../utils/worktree-sync';
 import { syncWorkspace, toRepoPath } from '@archon/git';
 import type { WorkspaceSyncResult } from '@archon/git';
@@ -228,31 +228,43 @@ async function dispatchOrchestratorWorkflow(
     codebase_id: codebase.id,
   });
 
-  // Validate and resolve isolation
+  // Validate and resolve isolation.
+  // A workflow with `worktree.enabled: false` short-circuits the resolver entirely
+  // and runs in the live checkout — no worktree creation, no env row. This is the
+  // declarative equivalent of CLI `--no-worktree` for workflows that should always
+  // run live (e.g. read-only triage, docs generation on the main checkout).
   let cwd: string;
-  try {
-    const result = await validateAndResolveIsolation(
-      { ...conversation, codebase_id: codebase.id },
-      codebase,
-      platform,
-      conversationId,
-      isolationHints
+  if (workflow.worktree?.enabled === false) {
+    getLog().info(
+      { workflowName: workflow.name, conversationId, codebaseId: codebase.id },
+      'workflow.worktree_disabled_by_policy'
     );
-    cwd = result.cwd;
-  } catch (error) {
-    if (error instanceof IsolationBlockedError) {
-      getLog().warn(
-        {
-          reason: error.reason,
-          conversationId,
-          codebaseId: codebase.id,
-          workflowName: workflow.name,
-        },
-        'isolation_blocked'
+    cwd = codebase.default_cwd;
+  } else {
+    try {
+      const result = await validateAndResolveIsolation(
+        { ...conversation, codebase_id: codebase.id },
+        codebase,
+        platform,
+        conversationId,
+        isolationHints
       );
-      return;
+      cwd = result.cwd;
+    } catch (error) {
+      if (error instanceof IsolationBlockedError) {
+        getLog().warn(
+          {
+            reason: error.reason,
+            conversationId,
+            codebaseId: codebase.id,
+            workflowName: workflow.name,
+          },
+          'isolation_blocked'
+        );
+        return;
+      }
+      throw error;
     }
-    throw error;
   }
 
   // Dispatch workflow
@@ -400,9 +412,9 @@ async function discoverAllWorkflows(conversation: Conversation): Promise<Discove
   let config: MergedConfig | undefined;
 
   try {
-    const result = await discoverWorkflowsWithConfig(getArchonWorkspacesPath(), loadConfig, {
-      globalSearchPath: getArchonHome(),
-    });
+    // Home-scoped workflows at ~/.archon/workflows/ are discovered automatically
+    // by discoverWorkflowsWithConfig — no option needed.
+    const result = await discoverWorkflowsWithConfig(getArchonWorkspacesPath(), loadConfig);
     workflows = [...result.workflows];
     allErrors.push(...result.errors);
   } catch (error) {

@@ -22,9 +22,14 @@ Archon supports a layered configuration system with sensible defaults, optional 
 │   ├── worktrees/          # Git worktrees for this project
 │   ├── artifacts/          # Workflow artifacts
 │   └── logs/               # Workflow execution logs
+├── workflows/              # Home-scoped workflows (source: 'global')
+├── commands/               # Home-scoped commands (source: 'global')
+├── scripts/                # Home-scoped scripts (runtime: bun | uv)
 ├── archon.db               # SQLite database (when DATABASE_URL not set)
 └── config.yaml             # Global configuration (optional)
 ```
+
+Home-scoped `workflows/`, `commands/`, and `scripts/` apply to every project on the machine. Repo-local files at `<repoRoot>/.archon/{workflows,commands,scripts}/` override them by filename (or script name). Each directory supports one level of subfolders for grouping; deeper nesting is ignored. See [Global Workflows](/guides/global-workflows/) for details and dotfiles-sync examples.
 
 ### Repository-Level (.archon/)
 
@@ -117,11 +122,17 @@ commands:
 # Worktree settings
 worktree:
   baseBranch: main  # Optional: auto-detected from git when not set
-  copyFiles:  # Optional: Additional files to copy to worktrees
-    - .env.example -> .env  # Rename during copy
+  copyFiles:  # Optional: Gitignored files/dirs to copy into new worktrees.
+              # `.archon/` is always copied automatically — don't list it.
+    - .env
     - .vscode               # Copy entire directory
+    - plans/                # Local plans not committed to the team repo
   initSubmodules: true  # Optional: default true — auto-detects .gitmodules and runs
                         # `git submodule update --init --recursive`. Set false to opt out.
+  path: .worktrees      # Optional: co-locate worktrees with the repo at
+                        # <repoRoot>/.worktrees/<branch> instead of under
+                        # ~/.archon/workspaces/<owner>/<repo>/worktrees/.
+                        # Must be relative; no absolute, no `..` segments.
 
 # Documentation directory
 docs:
@@ -162,7 +173,34 @@ assistants:
 
 This is useful when you maintain coding style or identity preferences in `~/.claude/CLAUDE.md` and want Archon sessions to respect them.
 
-**Default behavior:** The `.archon/` directory is always copied to worktrees automatically (contains artifacts, plans, workflows). Use `copyFiles` only for additional files like `.env` or `.vscode`.
+### Worktree file copying (`worktree.copyFiles`)
+
+`git worktree add` only copies **tracked** files into a new worktree. Anything gitignored — secrets, local planning docs, agent reports, IDE settings, data fixtures — is absent by default. Archon's `worktree.copyFiles` closes that gap: after the worktree is created, each listed path is copied from the canonical repo into the worktree via raw filesystem copy (not git), so gitignored content comes along for the ride.
+
+**Defaults — no config needed for the common case.** `.archon/` is always copied automatically. If you gitignore `.archon/` (or it's just not committed), your custom commands, workflows, and scripts still reach every worktree. You do not need to list `.archon/` in `copyFiles` — it's merged in for you.
+
+**Common entries:**
+
+```yaml
+worktree:
+  copyFiles:
+    - .env                  # local secrets
+    - .vscode/              # editor settings
+    - .claude/              # per-repo Claude Code config (agents, skills, hooks)
+    - plans/                # working docs that aren't committed
+    - reports/              # agent-generated markdown reports
+    - data/fixtures/        # local-only test data
+```
+
+**Semantics:**
+
+- Each entry is a path (file or directory) relative to the repo root — source and destination are always identical. No rename syntax.
+- Missing files are silently skipped (`ENOENT` at debug level), so you can list "optional" entries without bookkeeping.
+- Directories are copied recursively.
+- Per-entry failures are isolated — one bad entry won't abort the rest. Non-ENOENT failures (permissions, disk full) are surfaced as warnings on the environment.
+- Path-traversal attempts (entries resolving outside the repo root, or absolute paths on a different drive) are rejected — the entry is logged and skipped.
+
+**Interaction with `worktree.path`:** The copy step runs identically whether worktrees live under `~/.archon/workspaces/<owner>/<repo>/worktrees/` (default) or inside the repo at `<repoRoot>/<worktree.path>/` (repo-local). Both layouts get the same gitignored-file treatment.
 
 **Defaults behavior:** The app's bundled default commands and workflows are loaded at runtime and merged with repo-specific ones. Repo commands/workflows override app defaults by name. Set `defaults.loadDefaultCommands: false` or `defaults.loadDefaultWorkflows: false` to disable runtime loading.
 
@@ -174,6 +212,8 @@ This is useful when you maintain coding style or identity preferences in `~/.cla
 3. If auto-detection fails and a workflow references `$BASE_BRANCH`: Fails with an error explaining the resolution chain.
 
 **Docs path behavior:** The `docs.path` setting controls where the `$DOCS_DIR` variable points. When not configured, `$DOCS_DIR` defaults to `docs/`. Unlike `$BASE_BRANCH`, this variable always has a safe default and never throws an error. Configure it when your documentation lives outside the standard `docs/` directory (e.g., `packages/docs-web/src/content/docs`).
+
+**Worktree path behavior:** By default, every repo's worktrees live under `~/.archon/workspaces/<owner>/<repo>/worktrees/<branch>` — outside the repo, invisible to the IDE. Set `worktree.path` to opt in to a **repo-local** layout instead: worktrees are created at `<repoRoot>/<worktree.path>/<branch>` so they show up in the file tree and editor workspace. A common choice is `.worktrees`. Because worktrees now live inside the repository tree, you should add the directory to your `.gitignore` (Archon does not modify user-owned files). The configured path must be relative to the repo root; absolute paths and paths containing `..` segments fail loudly at worktree creation rather than silently falling back.
 
 ## Environment Variables
 
@@ -294,23 +334,42 @@ When `CLAUDE_USE_GLOBAL_AUTH` is unset, Archon auto-detects: it uses explicit to
 
 ### `.env` File Locations
 
-Infrastructure configuration (database URL, platform tokens) is stored in `.env` files:
+Archon keys env loading on **directory ownership, not filename**. `.archon/` (at `~/` or `<cwd>/`) is archon-owned. Anything else is yours.
 
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| **CLI** | `~/.archon/.env` | Global infrastructure config; CWD .env keys stripped first, then loaded with `override: true` (Archon config wins over shell-inherited vars) |
-| **Server (dev)** | `<archon-repo>/.env` + `~/.archon/.env` | Repo `.env` for platform tokens; `~/.archon/.env` loaded with `override: true` |
-| **Server (binary)** | `~/.archon/.env` | Single source of truth (repo `.env` path is not available in compiled binaries) |
+| Path | Stripped at boot? | Archon loads? | `archon setup` writes? |
+| --- | --- | --- | --- |
+| `<cwd>/.env` | **yes** (safety guard) | never | never |
+| `<cwd>/.archon/.env` | no | yes (repo scope, overrides user scope) | yes iff `--scope project` |
+| `~/.archon/.env` | no | yes (user scope) | yes iff `--scope home` (default) |
 
-**How it works**: At startup, the CLI and server strip all keys that Bun auto-loaded from the current working directory (`.env`, `.env.local`, `.env.development`, `.env.production`) and any nested Claude Code session markers (`CLAUDECODE`, `CLAUDE_CODE_*` except auth vars) before loading `~/.archon/.env`. This ensures target repo keys and nested-session guards are fully removed from `process.env` before any application code runs.
+**Load order at boot** (every entry point — CLI and server):
 
-**Best practice**: Use `~/.archon/.env` as the single source of truth:
+1. Strip keys Bun auto-loaded from `<cwd>/.env`, `.env.local`, `.env.development`, `.env.production` (prevents target-repo env from leaking into Archon).
+2. Load `~/.archon/.env` with `override: true` (archon config wins over shell-inherited vars).
+3. Load `<cwd>/.archon/.env` with `override: true` (repo scope wins over user scope).
+
+**Operator log lines** (stderr, emitted only when there is something to report):
+
+```
+[archon] stripped 2 keys from /path/to/target-repo (.env, .env.local) to prevent target repo env from leaking into Archon processes
+[archon] loaded 3 keys from ~/.archon/.env
+[archon] loaded 2 keys from /path/to/target-repo/.archon/.env (repo scope, overrides user scope)
+```
+
+**Which file should I use?**
+
+- **`~/.archon/.env`** — user-wide defaults (your personal `SLACK_WEBHOOK`, `DATABASE_URL`, etc.). Applies to every project.
+- **`<cwd>/.archon/.env`** — per-project overrides. Different webhook per repo, different DB per environment, etc.
+- **`<cwd>/.env`** — **your app's** env file. Archon does not read this file; it strips the keys at boot so they do not leak into Archon's process.
 
 ```bash
-# Create global config
+# User-wide
 mkdir -p ~/.archon
 cp .env.example ~/.archon/.env
-# Edit with your values
+
+# Per-project override (e.g. a different Slack webhook for this repo)
+mkdir -p /path/to/repo/.archon
+printf 'SLACK_WEBHOOK=https://hooks.slack.com/...\n' > /path/to/repo/.archon/.env
 ```
 
 ## Docker Configuration

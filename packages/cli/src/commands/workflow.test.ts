@@ -310,7 +310,7 @@ describe('workflowListCommand', () => {
     expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('Found 1 workflow(s)'));
   });
 
-  it('passes globalSearchPath to discoverWorkflowsWithConfig', async () => {
+  it('calls discoverWorkflowsWithConfig with (cwd, loadConfig) — home scope is internal', async () => {
     const { discoverWorkflowsWithConfig } = await import('@archon/workflows/workflow-discovery');
     (discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
       workflows: [],
@@ -319,11 +319,9 @@ describe('workflowListCommand', () => {
 
     await workflowListCommand('/test/path');
 
-    expect(discoverWorkflowsWithConfig).toHaveBeenCalledWith(
-      '/test/path',
-      expect.any(Function),
-      expect.objectContaining({ globalSearchPath: '/home/test/.archon' })
-    );
+    // After the globalSearchPath refactor, discovery reads ~/.archon/workflows/
+    // on every call with no option — every caller inherits home-scope for free.
+    expect(discoverWorkflowsWithConfig).toHaveBeenCalledWith('/test/path', expect.any(Function));
   });
 
   it('should throw error when discoverWorkflows fails', async () => {
@@ -973,6 +971,146 @@ describe('workflowRunCommand', () => {
     expect(error.message).toContain('Check your Archon workspace registration under');
     expect(error.message).toMatch(/workspaces\b/);
     expect(error.message).not.toContain('Remove the stale workspace entry');
+  });
+
+  // -------------------------------------------------------------------------
+  // Workflow-level `worktree.enabled` policy
+  // -------------------------------------------------------------------------
+
+  it('skips isolation when workflow YAML pins worktree.enabled: false', async () => {
+    const { discoverWorkflowsWithConfig } = await import('@archon/workflows/workflow-discovery');
+    const { executeWorkflow } = await import('@archon/workflows/executor');
+    const conversationDb = await import('@archon/core/db/conversations');
+    const codebaseDb = await import('@archon/core/db/codebases');
+    const isolation = await import('@archon/isolation');
+
+    const getIsolationProviderMock = isolation.getIsolationProvider as ReturnType<typeof mock>;
+    const providerBefore = getIsolationProviderMock.mock.results.at(-1)?.value as
+      | { create: ReturnType<typeof mock> }
+      | undefined;
+    const createCallsBefore = providerBefore?.create.mock.calls.length ?? 0;
+
+    (discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
+      workflows: [
+        makeTestWorkflowWithSource({
+          name: 'triage',
+          description: 'Read-only triage',
+          worktree: { enabled: false },
+        }),
+      ],
+      errors: [],
+    });
+    (conversationDb.getOrCreateConversation as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'conv-123',
+    });
+    (codebaseDb.findCodebaseByDefaultCwd as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'cb-123',
+      default_cwd: '/test/path',
+    });
+    (conversationDb.updateConversation as ReturnType<typeof mock>).mockResolvedValueOnce(undefined);
+    (executeWorkflow as ReturnType<typeof mock>).mockResolvedValueOnce({
+      success: true,
+      workflowRunId: 'run-123',
+    });
+
+    // No flags — policy alone should disable isolation
+    await workflowRunCommand('/test/path', 'triage', 'go', {});
+
+    const providerAfter = getIsolationProviderMock.mock.results.at(-1)?.value as
+      | { create: ReturnType<typeof mock> }
+      | undefined;
+    const createCallsAfter = providerAfter?.create.mock.calls.length ?? 0;
+    expect(createCallsAfter).toBe(createCallsBefore);
+  });
+
+  it('throws when workflow pins worktree.enabled: false but caller passes --branch', async () => {
+    const { discoverWorkflowsWithConfig } = await import('@archon/workflows/workflow-discovery');
+
+    (discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
+      workflows: [
+        makeTestWorkflowWithSource({
+          name: 'triage',
+          description: 'Read-only triage',
+          worktree: { enabled: false },
+        }),
+      ],
+      errors: [],
+    });
+
+    await expect(
+      workflowRunCommand('/test/path', 'triage', 'go', { branchName: 'feat-x' })
+    ).rejects.toThrow(/worktree\.enabled: false/);
+  });
+
+  it('throws when workflow pins worktree.enabled: false but caller passes --from', async () => {
+    const { discoverWorkflowsWithConfig } = await import('@archon/workflows/workflow-discovery');
+
+    (discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
+      workflows: [
+        makeTestWorkflowWithSource({
+          name: 'triage',
+          description: 'Read-only triage',
+          worktree: { enabled: false },
+        }),
+      ],
+      errors: [],
+    });
+
+    await expect(
+      workflowRunCommand('/test/path', 'triage', 'go', { fromBranch: 'dev' })
+    ).rejects.toThrow(/worktree\.enabled: false/);
+  });
+
+  it('accepts worktree.enabled: false + --no-worktree as redundant (no error)', async () => {
+    const { discoverWorkflowsWithConfig } = await import('@archon/workflows/workflow-discovery');
+    const { executeWorkflow } = await import('@archon/workflows/executor');
+    const conversationDb = await import('@archon/core/db/conversations');
+    const codebaseDb = await import('@archon/core/db/codebases');
+
+    (discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
+      workflows: [
+        makeTestWorkflowWithSource({
+          name: 'triage',
+          description: 'Read-only triage',
+          worktree: { enabled: false },
+        }),
+      ],
+      errors: [],
+    });
+    (conversationDb.getOrCreateConversation as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'conv-123',
+    });
+    (codebaseDb.findCodebaseByDefaultCwd as ReturnType<typeof mock>).mockResolvedValueOnce({
+      id: 'cb-123',
+      default_cwd: '/test/path',
+    });
+    (conversationDb.updateConversation as ReturnType<typeof mock>).mockResolvedValueOnce(undefined);
+    (executeWorkflow as ReturnType<typeof mock>).mockResolvedValueOnce({
+      success: true,
+      workflowRunId: 'run-123',
+    });
+
+    // Should not throw — redundant, not contradictory
+    await workflowRunCommand('/test/path', 'triage', 'go', { noWorktree: true });
+  });
+
+  it('throws when workflow pins worktree.enabled: true but caller passes --no-worktree', async () => {
+    const { discoverWorkflowsWithConfig } = await import('@archon/workflows/workflow-discovery');
+
+    (discoverWorkflowsWithConfig as ReturnType<typeof mock>).mockResolvedValueOnce({
+      workflows: [
+        makeTestWorkflowWithSource({
+          name: 'build',
+          description: 'Requires a worktree',
+          worktree: { enabled: true },
+        }),
+      ],
+      errors: [],
+    });
+
+    await expect(
+      workflowRunCommand('/test/path', 'build', 'go', { noWorktree: true })
+    ).rejects.toThrow(/worktree\.enabled: true/);
   });
 
   it('throws when isolation cannot be created due to missing codebase', async () => {

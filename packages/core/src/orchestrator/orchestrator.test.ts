@@ -1157,10 +1157,11 @@ describe('orchestrator-agent handleMessage', () => {
 
       await handleMessage(platform, 'chat-456', 'help');
 
+      // Discovery is called positionally with (cwd, loadConfig) — no options arg.
+      // Home-scoped workflows (~/.archon/workflows/) are discovered internally.
       expect(mockDiscoverWorkflows).toHaveBeenCalledWith(
         '/home/test/.archon/workspaces',
-        expect.any(Function),
-        { globalSearchPath: '/home/test/.archon' }
+        expect.any(Function)
       );
     });
 
