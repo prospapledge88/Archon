@@ -21,9 +21,9 @@
     "type-check": "bun x tsc --noEmit"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.89",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.121",
     "@archon/paths": "workspace:*",
-    "@openai/codex-sdk": "^0.116.0"
+    "@openai/codex-sdk": "^0.125.0"
   },
   "devDependencies": {
     "pino": "^9"

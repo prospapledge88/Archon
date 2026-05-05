@@ -51,9 +51,11 @@ const mockLoadConfig = mock(() =>
 
 const mockLogger = createMockLogger();
 
+const mockEnsureArchonWorkspacesPath = mock(() => Promise.resolve('/home/test/.archon/workspaces'));
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
   getArchonWorkspacesPath: mock(() => '/home/test/.archon/workspaces'),
+  ensureArchonWorkspacesPath: mockEnsureArchonWorkspacesPath,
   getArchonHome: mock(() => '/home/test/.archon'),
 }));
 
@@ -72,10 +74,14 @@ mock.module('../db/codebases', () => ({
   createCodebase: mock(() => Promise.resolve({ id: 'new-codebase-id' })),
 }));
 
+const mockUpdateSession = mock(() => Promise.resolve());
+const mockTransitionSession = mock(() =>
+  Promise.resolve({ id: 'session-1', assistant_session_id: null })
+);
 mock.module('../db/sessions', () => ({
   getActiveSession: mock(() => Promise.resolve(null)),
-  updateSession: mock(() => Promise.resolve()),
-  transitionSession: mock(() => Promise.resolve({ id: 'session-1', assistant_session_id: null })),
+  updateSession: mockUpdateSession,
+  transitionSession: mockTransitionSession,
 }));
 
 const mockParseCommand = mock(
@@ -902,6 +908,7 @@ describe('discoverAllWorkflows — remote sync', () => {
     mockSendQuery.mockClear();
     mockGetCodebaseEnvVars.mockReset();
     mockLoadConfig.mockReset();
+    mockEnsureArchonWorkspacesPath.mockClear();
     // Reset mocks between tests in this suite and restore safe defaults
     mockGetOrCreateConversation.mockImplementation(() => Promise.resolve(null));
     mockGetCodebase.mockImplementation(() => Promise.resolve(null));
@@ -927,6 +934,9 @@ describe('discoverAllWorkflows — remote sync', () => {
     expect(mockSyncWorkspace).toHaveBeenCalledWith('/repos/test-repo', undefined, {
       resetAfterFetch: false,
     });
+    // Regression guard: orchestrator must resolve cwd through the ensure variant
+    // so the workspaces dir is created before the AI provider spawn (issue #1528).
+    expect(mockEnsureArchonWorkspacesPath).toHaveBeenCalled();
   });
 
   test('passes resetAfterFetch=true for managed clones', async () => {
@@ -1600,5 +1610,75 @@ describe('handleMessage — workflow context injection', () => {
 
     // Non-critical path — must not block message handling
     await expect(handleMessage(platform, 'conv-1', 'Hello')).resolves.toBeUndefined();
+  });
+});
+
+// ─── Stale session ID clearing on error_during_execution ────────────────────
+
+describe('stale session ID clearing on error_during_execution', () => {
+  beforeEach(() => {
+    mockUpdateSession.mockClear();
+    mockTransitionSession.mockClear();
+    mockGetOrCreateConversation.mockReset();
+    mockGetCodebase.mockReset();
+    mockSendQuery.mockReset();
+    mockLogger.warn.mockClear();
+    mockGetRecentWorkflowResultMessages.mockReset();
+    mockGetRecentWorkflowResultMessages.mockImplementation(() => Promise.resolve([]));
+    mockDiscoverWorkflowsWithConfig.mockReset();
+    mockDiscoverWorkflowsWithConfig.mockImplementation(() =>
+      Promise.resolve({ workflows: [], errors: [] })
+    );
+    mockGetOrCreateConversation.mockImplementation(() => Promise.resolve(makeConversation()));
+    mockGetCodebase.mockImplementation(() => Promise.resolve(null));
+    mockListCodebases.mockReset();
+    mockListCodebases.mockImplementation(() => Promise.resolve([]));
+  });
+
+  test('handleStreamMode: clears session ID on error_during_execution result', async () => {
+    // Simulate AI returning error_during_execution with a stale session ID
+    mockSendQuery.mockImplementationOnce(async function* () {
+      yield {
+        type: 'result',
+        isError: true,
+        errorSubtype: 'error_during_execution',
+        sessionId: 'stale-session-id',
+      };
+    });
+    // transitionSession returns a session with an existing assistant_session_id
+    mockTransitionSession.mockResolvedValueOnce({
+      id: 'session-1',
+      assistant_session_id: 'stale-session-id',
+    });
+
+    const platform = makePlatform();
+    // Use streaming mode
+    (platform.getStreamingMode as ReturnType<typeof mock>).mockReturnValue('stream');
+    await handleMessage(platform, 'conv-1', 'hello');
+
+    // updateSession should be called with null to clear the stale session ID
+    expect(mockUpdateSession).toHaveBeenCalledWith('session-1', null);
+  });
+
+  test('handleBatchMode: clears session ID on error_during_execution result', async () => {
+    mockSendQuery.mockImplementationOnce(async function* () {
+      yield {
+        type: 'result',
+        isError: true,
+        errorSubtype: 'error_during_execution',
+        sessionId: 'stale-session-id',
+      };
+    });
+    mockTransitionSession.mockResolvedValueOnce({
+      id: 'session-1',
+      assistant_session_id: 'stale-session-id',
+    });
+
+    const platform = makePlatform();
+    // batch is the default from makePlatform, but be explicit
+    (platform.getStreamingMode as ReturnType<typeof mock>).mockReturnValue('batch');
+    await handleMessage(platform, 'conv-1', 'hello');
+
+    expect(mockUpdateSession).toHaveBeenCalledWith('session-1', null);
   });
 });
