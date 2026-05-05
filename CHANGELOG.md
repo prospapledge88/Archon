@@ -7,20 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<<<<<<< HEAD
-=======
-### Added
-
-- **`$LOOP_PREV_OUTPUT` workflow variable (loop nodes only)** — exposes the previous iteration's cleaned output (after `<promise>` tag stripping) to the current iteration's prompt. Empty on the first iteration and on the first iteration after resuming from an interactive approval gate. Enables `fresh_context: true` loops to reference what the prior pass said or did without carrying full session history. (#1367)
-
-### Changed
-
-- **Provider/model resolution: trust the SDK, drop allow-lists.** Removed `inferProviderFromModel` and `isModelCompatible` entirely. Provider is now resolved via a flat explicit chain — `node.provider ?? workflow.provider ?? config.assistant` — and never inferred from the model string. Model strings pass through to the SDK unchanged; the SDK validates them at request time. Codex's stream loop now matches Claude's contract (every terminal close emits exactly one `result` chunk; `error` events without a recovering `turn.completed` synthesize `result.isError` with subtype `codex_stream_incomplete`; `turn.failed` becomes `codex_turn_failed`). AI nodes that exit the streaming loop with empty assistant text and no structured output now fail loudly with `dag.node_empty_output` instead of completing as silent zero-output successes. Provider-id typos (workflow-level and per-node) are caught at YAML load time. **Migration**: workflows that previously relied on cross-provider model inference (e.g. `model: gpt-5.2-codex` with no `provider:`, expecting Archon to pick `codex` because Claude's allow-list rejected the string) must now set `provider:` explicitly. Workflows that already set both `provider:` and `model:` — and workflows that set only `model:` matching `config.assistant` — keep working unchanged. (#1463)
-
->>>>>>> bf1f471e (refactor(workflows): trust the SDK for model validation (#1463))
 ### Fixed
 
-- **Cherry-pick batch 2 from upstream (10 commits).** Selective Tier 1 picks from the upstream delta:
+- **Cherry-pick batch 3 from upstream — Tier 2 workflow engine (11 commits).** Workflow-engine improvements pulled selectively; one commit (`e33e0de6` — `archon-assist` opt-out of worktree) was deferred because it depends on the workflow `worktree:` policy schema that lives in a later upstream commit (`5ed38dc7`) not yet picked.
+  - `60eeb00e` — Inline sub-agent definitions on DAG nodes via the `agents:` field (Claude only). Pi-related additions in this commit were dropped (fork doesn't ship Pi).
+  - `e71c496a` — Bash nodes now receive `ARTIFACTS_DIR`, `LOG_DIR`, and `BASE_BRANCH` in their subprocess env, matching what AI nodes already see (#1387).
+  - `dcfb9d10` — Approval-node `message` fields now substitute `$nodeId.output` references just like prompt/when fields, so reviewers see actual upstream output instead of the literal placeholder (#1426).
+  - `8cfd5981` — New optional workflow-level `mutates_checkout: false` flag skips the path-exclusive lock so multiple runs of the same read-only workflow can execute concurrently on the same live checkout (#1438). Maintainer workflow file from upstream omitted (fork doesn't ship `maintainer-review-pr`).
+  - `3868f892` — New optional workflow-level `tags: [...]` field overrides the keyword-based Web UI tag inference; an empty array suppresses inference, an absent block keeps current behavior. Trimmed/deduped at parse time (#1190). Worktree-policy additions from this commit deferred along with `e33e0de6`.
+  - `287bb350` — New `$LOOP_PREV_OUTPUT` variable (loop nodes only) exposes the previous iteration's cleaned output (after `<promise>` tag stripping). Empty on the first iteration and the first iteration after resuming an interactive approval gate. Compose-coexists with the fork's existing `$PROJECT_KNOWLEDGE` variable; `substituteWorkflowVariables` now takes both as positional args (#1367).
+  - `bf1f471e` — Trust the SDK for model validation: removed `inferProviderFromModel` and `isModelCompatible`. Provider resolution is now a flat explicit chain (`node.provider ?? workflow.provider ?? config.assistant`); model strings pass through unchanged. Codex stream loop now matches Claude's contract for terminal close events. Provider-id typos fail at YAML load time. Pi community-provider scaffolding from this commit was excluded (fork doesn't ship Pi). **Migration**: workflows that relied on cross-provider model inference must now set `provider:` explicitly (#1463).
+  - `5d0a90d4` — Bundled PR-creating workflows now target `$BASE_BRANCH` instead of hard-coding `main`, so forks/projects with a non-`main` integration branch get correct PR targets (#1479).
+  - `7e4ea402` — Validator no longer rejects `$nodeId.output` references that appear inside fenced markdown code blocks in workflow prompts. Authors can now show example outputs in their prompts without tripping the unknown-node-ref check (#1478).
+  - `8295ece7` — Bundled review and PR-creating workflows stop using `git add -A`, which previously swept the workflow's own scratch artifacts (under `$ARTIFACTS_DIR`) into the staged commit. They now stage only their intended file paths (#1506).
+  - `ee8fcbf0` — `$nodeId.output.<field>` substitution serializes array/object values as JSON instead of `[object Object]`, so downstream nodes can re-parse structured output (#1482).
   - `0ec74410` — Bumped `hono` to `^4.12.16` and added `@hono/node-server` `^1.19.13` override (closes upstream #1484).
   - `0afbeb30` — Bumped `@anthropic-ai/claude-agent-sdk` to `0.2.121` and `@openai/codex-sdk` to `0.125.0`. Pi packages skipped (fork doesn't use Pi).
   - `cbcca8c1` — Orchestrator clears stale session ID on `error_during_execution` instead of persisting the failed session ID, preventing infinite failure loops after Claude session expiry (closes upstream #1280).
