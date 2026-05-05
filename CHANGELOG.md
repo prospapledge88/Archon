@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cherry-pick batch 4 from upstream — Tier 3 CLI (2 commits).** Two CLI commits picked from `coleam00/archon` upstream/dev. Three other CLI commits in the same chronological window were already in the fork from earlier batches (`056707d0` stale-workspace error, `7d067738` lazy-import bundled skill — both landed via PR #6/#7), and one large CLI commit (`5e61faf0` — setup overhaul + `archon doctor` + complete bundled skill) was deferred for separate review because it removes the database/Discord prompts the fork still surfaces.
+  - `4631b8e0` — New standalone `archon skill install [path]` subcommand copies the bundled Archon skill files into `<target>/.claude/skills/archon/` so users can install or refresh the skill outside the interactive setup wizard. `copyArchonSkill()` was refactored out of `commands/setup.ts` into `commands/skill.ts` so the helper can be shared without pulling in `@clack/prompts`. Defaults to the current directory (#1445).
+  - `88d01099` — `--version`, `-V`, `-version`, and lone `-v` are now treated as version requests, matching common CLI conventions; previously only `version` (positional) and `--help`/`-h` short-circuited (#1444).
+
 - **Cherry-pick batch 3 from upstream — Tier 2 workflow engine (11 commits).** Workflow-engine improvements pulled selectively; one commit (`e33e0de6` — `archon-assist` opt-out of worktree) was deferred because it depends on the workflow `worktree:` policy schema that lives in a later upstream commit (`5ed38dc7`) not yet picked.
   - `60eeb00e` — Inline sub-agent definitions on DAG nodes via the `agents:` field (Claude only). Pi-related additions in this commit were dropped (fork doesn't ship Pi).
   - `e71c496a` — Bash nodes now receive `ARTIFACTS_DIR`, `LOG_DIR`, and `BASE_BRANCH` in their subprocess env, matching what AI nodes already see (#1387).
