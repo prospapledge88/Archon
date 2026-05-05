@@ -115,6 +115,32 @@ export interface NodeConfig {
   mcp?: string;
   hooks?: unknown;
   skills?: string[];
+  /**
+   * Inline sub-agent definitions (keyed by kebab-case agent ID).
+   *
+   * Intentional hand-written duplicate of `agentDefinitionSchema` (authoritative
+   * source: `@archon/workflows/schemas/dag-node`). Normally we follow the
+   * project rule "derive types from Zod via `z.infer`, never write parallel
+   * interfaces" — broken here on purpose: `@archon/providers/types` is the
+   * contract subpath consumed by `@archon/workflows`, so importing from
+   * `@archon/workflows` would create a circular dependency.
+   *
+   * Drift risk: when the schema gains a field, this shape must be updated
+   * by hand. Follow-up work: extract the agent-definition contract to a
+   * lower-tier package so `z.infer` can be used end-to-end (#1276).
+   */
+  agents?: Record<
+    string,
+    {
+      description: string;
+      prompt: string;
+      model?: string;
+      tools?: string[];
+      disallowedTools?: string[];
+      skills?: string[];
+      maxTurns?: number;
+    }
+  >;
   allowed_tools?: string[];
   denied_tools?: string[];
   effort?: string;
@@ -150,6 +176,8 @@ export interface ProviderCapabilities {
   mcp: boolean;
   hooks: boolean;
   skills: boolean;
+  /** Whether the provider supports inline sub-agent definitions (Claude SDK's options.agents). */
+  agents: boolean;
   toolRestrictions: boolean;
   structuredOutput: boolean;
   envInjection: boolean;
@@ -177,13 +205,6 @@ export interface ProviderRegistration {
 
   /** Static capability declaration — used for dag-executor warnings */
   capabilities: ProviderCapabilities;
-
-  /**
-   * Model compatibility check. Returns true if the model string
-   * is valid for this provider. Used by workflow validation and
-   * provider inference from model names.
-   */
-  isModelCompatible: (model: string) => boolean;
 
   /** Whether this is a built-in (maintained by core team) or community provider */
   builtIn: boolean;

@@ -15,7 +15,6 @@ import { stepRetryConfigSchema } from './retry';
 import { loopNodeConfigSchema } from './loop';
 import { workflowNodeHooksSchema } from './hooks';
 import { isValidCommandName } from '../command-validation';
-import { isModelCompatible } from '../model-validation';
 
 // ---------------------------------------------------------------------------
 // TriggerRule
@@ -106,6 +105,26 @@ export const sandboxSettingsSchema = z
 
 export type SandboxSettings = z.infer<typeof sandboxSettingsSchema>;
 
+/**
+ * Claude Agent SDK AgentDefinition — inline sub-agent available via the Task tool.
+ * Mirrors the SDK's AgentDefinition type (sdk.d.ts), minus mcpServers and the
+ * experimental critical-reminder field.
+ */
+export const agentDefinitionSchema = z.object({
+  description: z.string().min(1, "'description' is required"),
+  prompt: z.string().min(1, "'prompt' is required"),
+  model: z.string().min(1).optional(),
+  tools: z.array(z.string().min(1)).optional(),
+  disallowedTools: z.array(z.string().min(1)).optional(),
+  skills: z.array(z.string().min(1)).optional(),
+  maxTurns: z.number().int().positive().optional(),
+});
+
+export type AgentDefinition = z.infer<typeof agentDefinitionSchema>;
+
+// Kebab-case: no leading/trailing/double hyphens (e.g. `brief-gen`, not `-brief`, `brief-`, `brief--gen`).
+const AGENT_ID_REGEX = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+
 // ---------------------------------------------------------------------------
 // DagNodeBase — common fields shared by all node types
 // ---------------------------------------------------------------------------
@@ -128,6 +147,13 @@ export const dagNodeBaseSchema = z.object({
   skills: z
     .array(z.string().min(1, 'each skill must be a non-empty string'))
     .nonempty("'skills' must be a non-empty array")
+    .optional(),
+  agents: z
+    .record(
+      z.string().regex(AGENT_ID_REGEX, 'agent IDs must be kebab-case (a-z, 0-9, hyphen)'),
+      agentDefinitionSchema
+    )
+    .refine(map => Object.keys(map).length > 0, "'agents' must have at least one entry")
     .optional(),
   effort: effortLevelSchema.optional(),
   thinking: thinkingConfigSchema.optional(),
@@ -305,6 +331,7 @@ export const BASH_NODE_AI_FIELDS: readonly string[] = [
   'hooks',
   'mcp',
   'skills',
+  'agents',
   'effort',
   'thinking',
   'maxBudgetUsd',
@@ -337,10 +364,13 @@ export const LOOP_NODE_AI_FIELDS: readonly string[] = BASH_NODE_AI_FIELDS.filter
  * - Non-empty id
  * - Exactly one of command/prompt/bash/loop (mutual exclusivity)
  * - command name validity (via isValidCommandName)
- * - Model/provider compatibility (via isModelCompatible)
  * - idle_timeout must be a finite positive number
  * - retry not allowed on loop nodes
  * - timeout on bash must be positive
+ *
+ * Note: provider identity is validated in loader.ts (workflow-level) and
+ * dag-executor.ts (node-level). Model strings are passed through to the SDK
+ * unchanged — the SDK is the source of truth for what model names exist.
  */
 export const dagNodeSchema = dagNodeBaseSchema
   .extend({
@@ -494,24 +524,6 @@ export const dagNodeSchema = dagNodeBaseSchema
         path: ['idle_timeout'],
       });
     }
-
-    // Provider/model compatibility (AI nodes only)
-    if (!hasBash && !hasLoop && !hasScript && data.provider && data.model) {
-      try {
-        if (!isModelCompatible(data.provider, data.model)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `model "${data.model}" is not compatible with provider "${data.provider}"`,
-          });
-        }
-      } catch (e) {
-        // isModelCompatible throws on unknown providers — surface as a validation issue
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: (e as Error).message,
-        });
-      }
-    }
   })
   .transform((data): DagNode => {
     const id = data.id.trim();
@@ -543,6 +555,7 @@ export const dagNodeSchema = dagNodeBaseSchema
       ...(data.hooks !== undefined ? { hooks: data.hooks } : {}),
       ...(data.mcp !== undefined ? { mcp: data.mcp.trim() } : {}),
       ...(data.skills !== undefined ? { skills: data.skills.map(s => s.trim()) } : {}),
+      ...(data.agents !== undefined ? { agents: data.agents } : {}),
       ...(data.effort !== undefined ? { effort: data.effort } : {}),
       ...(data.thinking !== undefined ? { thinking: data.thinking } : {}),
       ...(data.maxBudgetUsd !== undefined ? { maxBudgetUsd: data.maxBudgetUsd } : {}),

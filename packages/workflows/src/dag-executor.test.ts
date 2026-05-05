@@ -105,6 +105,7 @@ const mockClaudeCapabilities = () => ({
   mcp: true,
   hooks: true,
   skills: true,
+  agents: true,
   toolRestrictions: true,
   structuredOutput: true,
   envInjection: true,
@@ -120,6 +121,7 @@ const mockCodexCapabilities = () => ({
   mcp: false,
   hooks: false,
   skills: false,
+  agents: false,
   toolRestrictions: false,
   structuredOutput: true,
   envInjection: true,
@@ -749,9 +751,51 @@ describe('substituteNodeOutputRefs -- shell escaping', () => {
     expect(substituteNodeOutputRefs('echo $a.output', outputs, true)).toBe("echo 'hello\nworld'");
   });
 
-  it('object JSON field becomes quoted empty string when escapedForBash=true', () => {
+  it('object JSON field becomes JSON stringified when escapedForBash=true', () => {
     const outputs = new Map([['a', makeOutput('completed', JSON.stringify({ nested: { x: 1 } }))]]);
-    expect(substituteNodeOutputRefs('echo $a.output.nested', outputs, true)).toBe("echo ''");
+    expect(substituteNodeOutputRefs('echo $a.output.nested', outputs, true)).toBe(
+      'echo \'{"x":1}\''
+    );
+  });
+
+  it('array JSON field becomes JSON stringified', () => {
+    const outputs = new Map([
+      ['a', makeOutput('completed', JSON.stringify({ items: ['todo', 'fix'] }))],
+    ]);
+    expect(substituteNodeOutputRefs('$a.output.items', outputs)).toBe('["todo","fix"]');
+  });
+
+  it('array JSON field is shell-quoted when escapedForBash=true', () => {
+    const outputs = new Map([
+      ['a', makeOutput('completed', JSON.stringify({ items: ['todo', 'fix'] }))],
+    ]);
+    expect(substituteNodeOutputRefs('echo $a.output.items', outputs, true)).toBe(
+      'echo \'["todo","fix"]\''
+    );
+  });
+
+  it('nested object in array field becomes JSON stringified', () => {
+    const outputs = new Map([
+      [
+        'a',
+        makeOutput('completed', JSON.stringify({ files: [{ name: 'a.ts', status: 'modified' }] })),
+      ],
+    ]);
+    expect(substituteNodeOutputRefs('$a.output.files', outputs)).toBe(
+      '[{"name":"a.ts","status":"modified"}]'
+    );
+  });
+
+  it('null values in arrays stringify to "null"', () => {
+    const outputs = new Map([
+      ['a', makeOutput('completed', JSON.stringify({ items: [null, 'ok'] }))],
+    ]);
+    expect(substituteNodeOutputRefs('$a.output.items', outputs)).toBe('[null,"ok"]');
+  });
+
+  it('null object field becomes JSON stringified "null"', () => {
+    const outputs = new Map([['a', makeOutput('completed', JSON.stringify({ config: null }))]]);
+    expect(substituteNodeOutputRefs('$a.output.config', outputs)).toBe('null');
   });
 
   it('dot notation on invalid JSON returns quoted empty string when escapedForBash=true', () => {
@@ -2427,6 +2471,90 @@ describe('executeDagWorkflow -- skills options', () => {
     const warning = messages.find(m => m.includes('skills') && m.includes('codex'));
     expect(warning).toBeDefined();
   });
+
+  it('passes agents to sendQuery nodeConfig when node has inline agents', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    const agentsMap = {
+      'brief-gen': {
+        description: 'Summarises an issue',
+        prompt: 'You are concise.',
+        model: 'haiku',
+        tools: ['Bash', 'Read'],
+      },
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'dag-agents',
+        nodes: [{ id: 'review', command: 'my-cmd', agents: agentsMap }],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(mockSendQueryDag.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = mockSendQueryDag.mock.calls[0][3] as Record<string, unknown>;
+    const nodeConfig = optionsArg?.nodeConfig as Record<string, unknown>;
+    expect(nodeConfig?.agents).toEqual(agentsMap);
+  });
+
+  it('warns user when Codex DAG node has inline agents', async () => {
+    mockGetAgentProviderDag.mockReturnValue({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'codex',
+      getCapabilities: mockCodexCapabilities,
+    });
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'dag-codex-agents',
+        nodes: [
+          {
+            id: 'review',
+            command: 'my-cmd',
+            provider: 'codex',
+            agents: {
+              'brief-gen': { description: 'd', prompt: 'p' },
+            },
+          },
+        ],
+      },
+      workflowRun,
+      'codex',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistant: 'codex' }
+    );
+
+    const sendMessage = platform.sendMessage as ReturnType<typeof mock>;
+    const messages = sendMessage.mock.calls.map((call: unknown[]) => call[1] as string);
+    const warning = messages.find(m => m.includes('agents') && m.includes('codex'));
+    expect(warning).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2514,6 +2642,172 @@ nodes:
     const wf = result.workflow!;
     expect(wf.nodes).toBeDefined();
     expect(wf.nodes[0].skills).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inline agents — field validation via parseWorkflow
+// ---------------------------------------------------------------------------
+
+describe('agents field validation via parseWorkflow', () => {
+  it('parses a valid agents map on a DAG node', () => {
+    const yaml = `
+name: test-agents
+description: test
+nodes:
+  - id: triage
+    prompt: "Spawn a brief-gen sub-agent"
+    agents:
+      brief-gen:
+        description: Summarises an issue
+        prompt: "You are concise. Return JSON { summary }."
+        model: haiku
+        tools: [Bash, Read]
+`;
+    const result = parseWorkflow(yaml, 'agents.yaml');
+    expect(result.error).toBeNull();
+    expect(result.workflow).not.toBeNull();
+    const wf = result.workflow!;
+    const node = wf.nodes[0];
+    expect(node.agents).toBeDefined();
+    expect(node.agents!['brief-gen'].description).toBe('Summarises an issue');
+    expect(node.agents!['brief-gen'].model).toBe('haiku');
+    expect(node.agents!['brief-gen'].tools).toEqual(['Bash', 'Read']);
+  });
+
+  it('rejects an agent missing description', () => {
+    const yaml = `
+name: missing-desc
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents:
+      brief-gen:
+        prompt: "You are concise."
+`;
+    const result = parseWorkflow(yaml, 'missing-desc.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('agents');
+  });
+
+  it('rejects an agent missing prompt', () => {
+    const yaml = `
+name: missing-prompt
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents:
+      brief-gen:
+        description: "A brief generator"
+`;
+    const result = parseWorkflow(yaml, 'missing-prompt.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('agents');
+  });
+
+  it('rejects empty agents map', () => {
+    const yaml = `
+name: empty-agents
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents: {}
+`;
+    const result = parseWorkflow(yaml, 'empty-agents.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('agents');
+  });
+
+  it('rejects agent ID that is not kebab-case', () => {
+    const yaml = `
+name: bad-id
+description: test
+nodes:
+  - id: triage
+    prompt: "p"
+    agents:
+      BriefGen:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'bad-id.yaml');
+    expect(result.error).not.toBeNull();
+    expect(result.error!.error).toContain('kebab-case');
+  });
+
+  it('ignores agents on bash nodes (field stripped, no error)', () => {
+    const yaml = `
+name: bash-agents
+description: test
+nodes:
+  - id: lint
+    bash: "echo lint"
+    agents:
+      helper:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'bash-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
+  });
+
+  it('ignores agents on script nodes (field stripped, no error)', () => {
+    const yaml = `
+name: script-agents
+description: test
+nodes:
+  - id: run
+    script: 'console.log("hi")'
+    runtime: bun
+    agents:
+      helper:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'script-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
+  });
+
+  it('ignores agents on loop nodes (field stripped, no error)', () => {
+    const yaml = `
+name: loop-agents
+description: test
+nodes:
+  - id: iterate
+    loop:
+      prompt: "Do the work"
+      until: "DONE"
+      max_iterations: 2
+    agents:
+      helper:
+        description: "d"
+        prompt: "p"
+`;
+    const result = parseWorkflow(yaml, 'loop-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
+  });
+
+  it('node with no agents field is undefined', () => {
+    const yaml = `
+name: no-agents
+description: test
+nodes:
+  - id: basic
+    prompt: "Do something"
+`;
+    const result = parseWorkflow(yaml, 'no-agents.yaml');
+    expect(result.error).toBeNull();
+    const wf = result.workflow!;
+    expect(wf.nodes[0].agents).toBeUndefined();
   });
 });
 
@@ -2886,6 +3180,266 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       );
 
       expect(mockSendQueryDag.mock.calls.length).toBe(3);
+    });
+
+    it('substitutes $LOOP_PREV_OUTPUT with previous iteration output (empty on iter 1)', async () => {
+      // Iteration 1 emits a distinctive output, iteration 2 emits the completion signal.
+      // We then assert the prompt sent to the AI: iteration 1 strips $LOOP_PREV_OUTPUT
+      // to empty, iteration 2 receives iteration 1's cleaned output.
+      let callCount = 0;
+      mockSendQueryDag.mockImplementation(function* () {
+        callCount++;
+        if (callCount === 1) {
+          yield { type: 'assistant', content: 'Iter1 output: 2 type errors in users.ts' };
+          yield { type: 'result', sessionId: 'loop-session-1' };
+        } else {
+          yield { type: 'assistant', content: 'All fixed. <promise>COMPLETE</promise>' };
+          yield { type: 'result', sessionId: 'loop-session-2' };
+        }
+      });
+
+      const mockDeps = createMockDeps();
+      const platform = createMockPlatform();
+      const workflowRun = makeWorkflowRun();
+
+      await executeDagWorkflow(
+        mockDeps,
+        platform,
+        'conv-dag',
+        testDir,
+        {
+          name: 'dag-loop-prev-output',
+          nodes: [
+            {
+              id: 'fix-loop',
+              loop: {
+                prompt: 'Previous output: <<$LOOP_PREV_OUTPUT>>. Fix and emit COMPLETE.',
+                until: 'COMPLETE',
+                max_iterations: 5,
+                fresh_context: true,
+              },
+            },
+          ],
+        },
+        workflowRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      expect(mockSendQueryDag.mock.calls.length).toBe(2);
+      const promptIter1 = mockSendQueryDag.mock.calls[0][0] as string;
+      const promptIter2 = mockSendQueryDag.mock.calls[1][0] as string;
+      // Iteration 1: $LOOP_PREV_OUTPUT substitutes to empty string.
+      expect(promptIter1).toContain('Previous output: <<>>.');
+      // Iteration 2: receives iteration 1's cleaned output.
+      expect(promptIter2).toContain(
+        'Previous output: <<Iter1 output: 2 type errors in users.ts>>.'
+      );
+    });
+
+    it('strips <promise> tags from $LOOP_PREV_OUTPUT (uses cleaned output)', async () => {
+      let callCount = 0;
+      mockSendQueryDag.mockImplementation(function* () {
+        callCount++;
+        if (callCount === 1) {
+          // Iteration 1 includes a non-completion XML tag in its output. The cleaned
+          // output (after stripCompletionTags) drops <promise>...</promise> blocks.
+          // We use a non-matching signal here so iteration 1 does NOT complete.
+          yield {
+            type: 'assistant',
+            content: 'Real work output. <promise>NOT_DONE_YET</promise>',
+          };
+          yield { type: 'result', sessionId: 'loop-session-1' };
+        } else {
+          yield { type: 'assistant', content: 'Done. <promise>COMPLETE</promise>' };
+          yield { type: 'result', sessionId: 'loop-session-2' };
+        }
+      });
+
+      const mockDeps = createMockDeps();
+      const platform = createMockPlatform();
+      const workflowRun = makeWorkflowRun();
+
+      await executeDagWorkflow(
+        mockDeps,
+        platform,
+        'conv-dag',
+        testDir,
+        {
+          name: 'dag-loop-prev-clean',
+          nodes: [
+            {
+              id: 'fix-loop',
+              loop: {
+                prompt: 'PREV=[$LOOP_PREV_OUTPUT]',
+                until: 'COMPLETE',
+                max_iterations: 5,
+                fresh_context: true,
+              },
+            },
+          ],
+        },
+        workflowRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      expect(mockSendQueryDag.mock.calls.length).toBe(2);
+      const promptIter2 = mockSendQueryDag.mock.calls[1][0] as string;
+      // The previous-output payload must be the *cleaned* output — no <promise> tags.
+      expect(promptIter2).toContain('PREV=[Real work output.');
+      expect(promptIter2).not.toContain('<promise>');
+    });
+
+    it('$LOOP_PREV_OUTPUT is empty on the first iteration after interactive resume', async () => {
+      // Regression guard for the resume-from-approval path: when an interactive
+      // loop pauses at the approval gate, the prior `lastIterationOutput` lives
+      // in a separate process and is not persisted. On resume, the executor must
+      // substitute $LOOP_PREV_OUTPUT to '' on the first resumed iteration —
+      // never to whatever the paused run produced.
+      //
+      // Wirasm-suggested shape (PR #1367 review): two executeDagWorkflow calls.
+      // The first call pauses at the gate after iteration 1; the second call
+      // resumes with metadata.approval populated and runs iteration 2.
+
+      // ---- Call 1: fresh run, iteration 1 emits no completion → pauses at gate
+      mockSendQueryDag.mockImplementationOnce(function* () {
+        yield { type: 'assistant', content: 'Iter1 output: 2 type errors in users.ts' };
+        yield { type: 'result', sessionId: 'loop-session-1' };
+      });
+      const mockDeps1 = createMockDeps();
+      const platform1 = createMockPlatform();
+      const freshRun = makeWorkflowRun('resume-prev-fresh-run');
+
+      await executeDagWorkflow(
+        mockDeps1,
+        platform1,
+        'conv-dag',
+        testDir,
+        {
+          name: 'interactive-loop-resume-prev-output',
+          nodes: [
+            {
+              id: 'refine',
+              loop: {
+                prompt:
+                  'User: $LOOP_USER_INPUT. PREV=<<$LOOP_PREV_OUTPUT>>. Continue or emit COMPLETE.',
+                until: 'COMPLETE',
+                max_iterations: 10,
+                interactive: true,
+                gate_message: 'Review and provide feedback.',
+              },
+            },
+          ],
+        },
+        freshRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      // First iteration of a fresh interactive loop: $LOOP_PREV_OUTPUT empty;
+      // $LOOP_USER_INPUT empty (no user has spoken yet).
+      expect(mockSendQueryDag.mock.calls.length).toBe(1);
+      const promptIter1 = mockSendQueryDag.mock.calls[0][0] as string;
+      expect(promptIter1).toContain('PREV=<<>>.');
+      expect(promptIter1).toContain('User: .');
+      // Fresh interactive loop must pause at the gate, not return early.
+      const pauseCalls1 = (
+        mockDeps1.store.pauseWorkflowRun as Mock<
+          (id: string, ctx: Record<string, unknown>) => Promise<void>
+        >
+      ).mock.calls;
+      expect(pauseCalls1.length).toBe(1);
+      expect(pauseCalls1[0][1]).toMatchObject({
+        type: 'interactive_loop',
+        nodeId: 'refine',
+        iteration: 1,
+      });
+
+      // ---- Call 2: resumed run — metadata carries iter 1 + user input.
+      // iter 2 emits the completion signal so the loop exits cleanly.
+      mockSendQueryDag.mockImplementationOnce(function* () {
+        yield { type: 'assistant', content: 'All clear. <promise>COMPLETE</promise>' };
+        yield { type: 'result', sessionId: 'loop-session-2' };
+      });
+      const mockDeps2 = createMockDeps();
+      const platform2 = createMockPlatform();
+      const resumedRun = makeWorkflowRun('resume-prev-resume-run', {
+        metadata: {
+          approval: {
+            type: 'interactive_loop',
+            nodeId: 'refine',
+            iteration: 1,
+            sessionId: 'loop-session-1',
+            message: 'Review and provide feedback.',
+          },
+          loop_user_input: 'looks good, ship it',
+        },
+      });
+
+      await executeDagWorkflow(
+        mockDeps2,
+        platform2,
+        'conv-dag',
+        testDir,
+        {
+          name: 'interactive-loop-resume-prev-output',
+          nodes: [
+            {
+              id: 'refine',
+              loop: {
+                prompt:
+                  'User: $LOOP_USER_INPUT. PREV=<<$LOOP_PREV_OUTPUT>>. Continue or emit COMPLETE.',
+                until: 'COMPLETE',
+                max_iterations: 10,
+                interactive: true,
+                gate_message: 'Review and provide feedback.',
+              },
+            },
+          ],
+        },
+        resumedRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      // Second executeDagWorkflow call started a fresh sendQuery generator (mock
+      // call index 1 across the two runs). The resumed iteration must NOT carry
+      // the prior process's iter-1 output through $LOOP_PREV_OUTPUT — it must
+      // substitute to ''.
+      expect(mockSendQueryDag.mock.calls.length).toBe(2);
+      const promptResumeIter = mockSendQueryDag.mock.calls[1][0] as string;
+      expect(promptResumeIter).toContain('PREV=<<>>.');
+      expect(promptResumeIter).not.toContain('Iter1 output: 2 type errors');
+      // The resume's user input flows through on the first resumed iteration.
+      expect(promptResumeIter).toContain('User: looks good, ship it.');
+      // Resume call exits via completion, not via a second pause at the gate.
+      const pauseCalls2 = (
+        mockDeps2.store.pauseWorkflowRun as Mock<
+          (id: string, ctx: Record<string, unknown>) => Promise<void>
+        >
+      ).mock.calls;
+      expect(pauseCalls2.length).toBe(0);
     });
 
     it('fails when max_iterations exceeded', async () => {
@@ -3971,17 +4525,21 @@ describe('executeDagWorkflow -- terminal node output selection', () => {
     expect(result).toBe('Final summary text');
   });
 
-  it('returns undefined when the single terminal node produces no output', async () => {
+  it('fails node when the AI stream closes with no assistant output', async () => {
+    // Empty assistant output on AI nodes (`command:`/`prompt:`) typically
+    // indicates a silent provider rejection or stream interruption that
+    // didn't yield a result.isError chunk. Treat it as a node failure
+    // rather than a successful empty completion.
     mockSendQueryDag.mockImplementation(async function* () {
-      // No assistant content — empty output
       yield { type: 'result', sessionId: 'sess-empty' };
     });
 
-    const mockDeps = createMockDeps();
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
     const platform = createMockPlatform();
     const workflowRun = makeWorkflowRun();
 
-    const result = await executeDagWorkflow(
+    await executeDagWorkflow(
       mockDeps,
       platform,
       'conv-dag',
@@ -3997,7 +4555,120 @@ describe('executeDagWorkflow -- terminal node output selection', () => {
       minimalConfig
     );
 
-    expect(result).toBeUndefined();
+    const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const nodeFailedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_failed'
+    );
+    expect(nodeFailedEvents.length).toBeGreaterThan(0);
+    const failedData = (nodeFailedEvents[0][0] as Record<string, unknown>).data as Record<
+      string,
+      unknown
+    >;
+    expect(failedData.error).toContain('produced no assistant output');
+    // Workflow-level failure must propagate, not just the node event.
+    expect(store.failWorkflowRun).toHaveBeenCalled();
+  });
+
+  it('does NOT fail node when stream yields no assistant text but a structuredOutput is present', async () => {
+    // Output-format nodes legitimately produce zero free-form text — the
+    // useful payload is the structuredOutput field. The empty-output guard
+    // must spare them.
+    mockSendQueryDag.mockImplementation(async function* () {
+      yield {
+        type: 'result',
+        sessionId: 'sess-structured',
+        structuredOutput: { category: 'math' },
+      };
+    });
+
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'structured-only-dag',
+        nodes: [
+          {
+            id: 'classify',
+            prompt: 'Classify this',
+            output_format: { type: 'object', properties: {} },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const nodeFailedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_failed'
+    );
+    expect(nodeFailedEvents.length).toBe(0);
+    const nodeCompletedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_completed'
+    );
+    expect(nodeCompletedEvents.length).toBeGreaterThan(0);
+  });
+
+  it('fails the run when a node specifies an unknown provider (defense-in-depth at execution time)', async () => {
+    // Loader-time validation also catches this (loader.ts iterates dagNodes
+    // after parsing), but the dag-executor's resolveNodeProviderAndModel
+    // throws as defense-in-depth in case a code path bypasses the loader.
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'unknown-provider-dag',
+        nodes: [
+          {
+            id: 'bad',
+            command: 'my-cmd',
+            provider: 'claud', // typo
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect(store.failWorkflowRun).toHaveBeenCalled();
+    // The "unknown provider" detail surfaces on the node_failed event; the
+    // workflow-level fail message is a generic "no successful nodes" summary.
+    const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const nodeFailedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_failed'
+    );
+    expect(nodeFailedEvents.length).toBeGreaterThan(0);
+    const nodeFailedData = (nodeFailedEvents[0][0] as Record<string, unknown>).data as Record<
+      string,
+      unknown
+    >;
+    expect(nodeFailedData.error).toContain("unknown provider 'claud'");
   });
 
   it('excludes intermediate nodes with dependents from terminal set (fan-in DAG)', async () => {
@@ -4535,6 +5206,112 @@ describe('executeDagWorkflow -- approval node', () => {
       1
     );
   });
+
+  it('approval message substitutes $nodeId.output.field references from upstream structured output', async () => {
+    // Repro for: approval gates were rendering literal "$gather-context.output.repo_name"
+    // instead of resolved values, breaking interactive workflows like atlas-onboard.
+    // Parity: prompt/bash/loop/cancel nodes already get substituteNodeOutputRefs;
+    // approval.message must too so the human sees concrete values.
+    const structuredJson = {
+      repo_name: 'hcr-els',
+      app_code: 'CCELS',
+      frontend_port: 3012,
+    };
+
+    const commandsDir = join(testDir, '.archon', 'commands');
+    await mkdir(commandsDir, { recursive: true });
+    await writeFile(join(commandsDir, 'gather-context.md'), 'Gather context: $USER_MESSAGE');
+
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: JSON.stringify(structuredJson) };
+      yield { type: 'result', sessionId: 'sid-approval-sub', structuredOutput: structuredJson };
+    });
+
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('approval-sub-run');
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-approval-sub',
+      testDir,
+      {
+        name: 'approval-sub-test',
+        nodes: [
+          {
+            id: 'gather-context',
+            command: 'gather-context',
+            output_format: {
+              type: 'object',
+              properties: {
+                repo_name: { type: 'string' },
+                app_code: { type: 'string' },
+                frontend_port: { type: 'number' },
+              },
+            },
+          },
+          {
+            id: 'confirm',
+            depends_on: ['gather-context'],
+            approval: {
+              message:
+                'Repo: $gather-context.output.repo_name | App: $gather-context.output.app_code | Port: $gather-context.output.frontend_port',
+            },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // gather-context AI call ran once; approval node does NOT call AI
+    expect(mockSendQueryDag.mock.calls.length).toBe(1);
+
+    // pauseWorkflowRun should receive the SUBSTITUTED message, not the literal placeholders
+    const pauseCalls = (
+      store.pauseWorkflowRun as Mock<(id: string, ctx: Record<string, unknown>) => Promise<void>>
+    ).mock.calls;
+    expect(pauseCalls.length).toBe(1);
+    expect(pauseCalls[0][1]).toMatchObject({
+      type: 'approval',
+      nodeId: 'confirm',
+      message: 'Repo: hcr-els | App: CCELS | Port: 3012',
+    });
+
+    // The fix touches FOUR emission sites (safeSendMessage / createWorkflowEvent /
+    // pauseWorkflowRun / event-emitter). Assert the other two reachable surfaces too —
+    // a future regression at any one of them would otherwise pass this test silently.
+    // (Per CodeRabbit review of PR coleam00/Archon#1426.)
+
+    // (a) The chat-surface prompt emitted via platform.sendMessage must contain the
+    //     substituted message and must NOT contain literal $gather-context.output refs.
+    const sentMessages = (
+      platform.sendMessage as Mock<(...args: unknown[]) => Promise<void>>
+    ).mock.calls.map((c: unknown[]) => c[1] as string);
+    expect(sentMessages.some(m => m.includes('Repo: hcr-els | App: CCELS | Port: 3012'))).toBe(
+      true
+    );
+    expect(sentMessages.some(m => m.includes('$gather-context.output'))).toBe(false);
+
+    // (b) The persisted approval_requested workflow event's data.message must be substituted.
+    const approvalRequestedEvents = (
+      store.createWorkflowEvent as Mock<() => Promise<void>>
+    ).mock.calls.filter(
+      (c: unknown[]) => (c[0] as { event_type: string }).event_type === 'approval_requested'
+    );
+    expect(approvalRequestedEvents.length).toBe(1);
+    expect((approvalRequestedEvents[0][0] as { data: { message: string } }).data.message).toBe(
+      'Repo: hcr-els | App: CCELS | Port: 3012'
+    );
+  });
 });
 describe('executeDagWorkflow -- env var injection', () => {
   let testDir: string;
@@ -4972,6 +5749,7 @@ describe('executeDagWorkflow -- cost tracking', () => {
     let callCount = 0;
     mockSendQueryDag.mockImplementation(function* () {
       callCount++;
+      yield { type: 'assistant', content: `Step ${String(callCount)} output` };
       yield { type: 'result', sessionId: `sid-${String(callCount)}`, cost: 0.001 };
     });
 
@@ -5013,6 +5791,7 @@ describe('executeDagWorkflow -- cost tracking', () => {
 
   it('omits total_cost_usd from completeWorkflowRun when no cost yielded', async () => {
     mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'Some output' };
       yield { type: 'result', sessionId: 'sid-no-cost' };
     });
 

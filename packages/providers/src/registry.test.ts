@@ -22,6 +22,7 @@ function makeMockProvider(id: string): IAgentProvider {
       mcp: false,
       hooks: false,
       skills: false,
+      agents: false,
       toolRestrictions: false,
       structuredOutput: false,
       envInjection: false,
@@ -46,7 +47,6 @@ function makeMockRegistration(
     displayName: `Mock ${id}`,
     factory: () => makeMockProvider(id),
     capabilities: makeMockProvider(id).getCapabilities(),
-    isModelCompatible: () => true,
     builtIn: false,
     ...overrides,
   };
@@ -180,7 +180,6 @@ describe('registry', () => {
       expect(reg.displayName).toBe('Claude (Anthropic)');
       expect(reg.builtIn).toBe(true);
       expect(typeof reg.factory).toBe('function');
-      expect(typeof reg.isModelCompatible).toBe('function');
     });
 
     test('throws for unknown provider', () => {
@@ -245,27 +244,6 @@ describe('registry', () => {
       clearRegistry();
       expect(getRegisteredProviders()).toEqual([]);
       expect(isRegisteredProvider('claude')).toBe(false);
-    });
-  });
-
-  describe('built-in model compatibility', () => {
-    test('Claude registration matches Claude model patterns', () => {
-      const reg = getRegistration('claude');
-      expect(reg.isModelCompatible('sonnet')).toBe(true);
-      expect(reg.isModelCompatible('opus')).toBe(true);
-      expect(reg.isModelCompatible('haiku')).toBe(true);
-      expect(reg.isModelCompatible('inherit')).toBe(true);
-      expect(reg.isModelCompatible('claude-3.5-sonnet')).toBe(true);
-      expect(reg.isModelCompatible('gpt-4')).toBe(false);
-    });
-
-    test('Codex registration rejects Claude model patterns', () => {
-      const reg = getRegistration('codex');
-      expect(reg.isModelCompatible('sonnet')).toBe(false);
-      expect(reg.isModelCompatible('claude-3.5-sonnet')).toBe(false);
-      expect(reg.isModelCompatible('inherit')).toBe(false);
-      expect(reg.isModelCompatible('gpt-4')).toBe(true);
-      expect(reg.isModelCompatible('o3-mini')).toBe(true);
     });
   });
 });

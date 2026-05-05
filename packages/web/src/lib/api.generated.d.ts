@@ -2246,6 +2246,17 @@ export interface components {
       };
       mcp?: string;
       skills?: string[];
+      agents?: {
+        [key: string]: {
+          description: string;
+          prompt: string;
+          model?: string;
+          tools?: string[];
+          disallowedTools?: string[];
+          skills?: string[];
+          maxTurns?: number;
+        };
+      };
       /** @enum {string} */
       effort?: 'low' | 'medium' | 'high' | 'max';
       thinking?:
@@ -2381,6 +2392,10 @@ export interface components {
           args?: string[];
         };
       };
+      worktree?: {
+        enabled?: boolean;
+      };
+      tags?: string[];
       nodes: components['schemas']['DagNode'][];
     };
     /** @enum {string} */
@@ -2629,6 +2644,7 @@ export interface components {
       runningWorkflows: number;
       version?: string;
       is_docker: boolean;
+      activePlatforms?: string[];
     };
     UpdateCheckResponse: {
       updateAvailable: boolean;
