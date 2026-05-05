@@ -95,6 +95,26 @@ type NodeExecutionResult = NodeOutput & { costUsd?: number };
 const lastNodeCancelCheck = new Map<string, number>();
 const CANCEL_CHECK_INTERVAL_MS = 10_000;
 
+/**
+ * Policy for the during-streaming cancel check: should the currently-streaming
+ * node be allowed to continue for a given observed run status?
+ *
+ * - `running`: the normal case → continue.
+ * - `paused`: a concurrent approval node in the same topological layer has
+ *   transitioned the run to paused. The streaming node should finish its own
+ *   output; workflow progression is gated by the approval node, not by tearing
+ *   down unrelated in-flight streams.
+ * - `null` (run deleted), `cancelled`, `failed`, `completed`, or any other
+ *   state → abort the stream.
+ *
+ * Exported for unit testing; the full streaming-cancel branch in
+ * `executeNodeInternal` only fires once per 10s (CANCEL_CHECK_INTERVAL_MS), so
+ * integration-level coverage of the policy is timing-sensitive and flaky.
+ */
+export function shouldContinueStreamingForStatus(status: string | null): boolean {
+  return status === 'running' || status === 'paused';
+}
+
 /** Throttle state for activity heartbeat writes (only used for stale/zombie detection) */
 const lastNodeActivityUpdate = new Map<string, number>();
 const ACTIVITY_HEARTBEAT_INTERVAL_MS = 60_000;
@@ -604,12 +624,19 @@ async function executeNodeInternal(
       const tickNow = Date.now();
       const nodeKey = `${workflowRun.id}:${node.id}`;
 
-      // Cancel/pause check — read-only, no write contention in WAL mode (every 10s)
+      // Cancel/pause check — read-only, no write contention in WAL mode (every 10s).
+      //
+      // `paused` is tolerated here: an approval node can transition the run to
+      // paused while this concurrent node is mid-stream (same topological layer).
+      // The streaming node should be allowed to finish its own output — the
+      // paused gate owns workflow progression, not individual node lifecycles.
+      // Only truly terminal / unknown states (null, cancelled, failed, completed)
+      // abort the in-flight stream.
       if (tickNow - (lastNodeCancelCheck.get(nodeKey) ?? 0) > CANCEL_CHECK_INTERVAL_MS) {
         lastNodeCancelCheck.set(nodeKey, tickNow);
         try {
           const streamStatus = await deps.store.getWorkflowRunStatus(workflowRun.id);
-          if (streamStatus === null || streamStatus !== 'running') {
+          if (!shouldContinueStreamingForStatus(streamStatus)) {
             getLog().info(
               { workflowRunId: workflowRun.id, nodeId: node.id, status: streamStatus ?? 'deleted' },
               'dag.stop_detected_during_streaming'
@@ -766,6 +793,25 @@ async function executeNodeInternal(
           throw new Error(
             `Node '${node.id}' exceeded cost cap${cap !== undefined ? ` of $${cap.toFixed(2)}` : ''}.`
           );
+        }
+        // Fail loudly on any other SDK error result. Previously we broke out of
+        // the stream silently, producing empty/partial output without signaling
+        // failure — which let failed iterations masquerade as successes (#1208).
+        if (msg.isError) {
+          const subtype = msg.errorSubtype ?? 'unknown';
+          const errorsDetail = msg.errors?.length ? ` — ${msg.errors.join('; ')}` : '';
+          getLog().error(
+            {
+              nodeId: node.id,
+              errorSubtype: subtype,
+              errors: msg.errors,
+              sessionId: msg.sessionId,
+              stopReason: msg.stopReason,
+              durationMs: Date.now() - nodeStartTime,
+            },
+            'dag.node_sdk_error_result'
+          );
+          throw new Error(`Node '${node.id}' failed: SDK returned ${subtype}${errorsDetail}`);
         }
         break; // Result is the "I'm done" signal — don't wait for subprocess to exit
       } else if (msg.type === 'system' && msg.content) {
@@ -1516,9 +1562,13 @@ async function executeLoopNode(
   for (let i = startIteration; i <= loop.max_iterations; i++) {
     const iterationStart = Date.now();
 
-    // Check for non-running status between iterations (cancellation, deletion, or future: pause)
+    // Check for non-running status between iterations. `paused` is tolerated
+    // here for the same reason as the streaming check: a sibling approval
+    // node in the same topological layer may pause the run while this loop
+    // is between iterations — the loop should continue its own iterations
+    // regardless of unrelated pauses elsewhere in the DAG.
     const runStatus = await deps.store.getWorkflowRunStatus(workflowRun.id);
-    if (runStatus === null || runStatus !== 'running') {
+    if (!shouldContinueStreamingForStatus(runStatus)) {
       const effectiveStatus = runStatus ?? 'deleted';
       getLog().info(
         { workflowRunId: workflowRun.id, nodeId: node.id, iteration: i, status: effectiveStatus },
@@ -1600,7 +1650,7 @@ async function executeLoopNode(
       })) {
         if (msg.type === 'assistant') {
           fullOutput += msg.content;
-          const cleaned = stripCompletionTags(msg.content);
+          const cleaned = stripCompletionTags(msg.content, loop.until);
           cleanOutput += cleaned;
           if (platform.getStreamingMode() === 'stream' && cleaned) {
             await safeSendMessage(platform, conversationId, cleaned, msgContext);
@@ -1639,6 +1689,28 @@ async function executeLoopNode(
           if (msg.stopReason !== undefined) loopFinalStopReason = msg.stopReason;
           if (msg.numTurns !== undefined) {
             loopTotalNumTurns = (loopTotalNumTurns ?? 0) + msg.numTurns;
+          }
+          // Fail the iteration loudly on SDK error results. Previously we broke
+          // silently, producing empty output and continuing to the next iteration —
+          // which made `error_during_execution` on resumed interactive loops look
+          // like a "5-second crash" that kept burning iterations (#1208).
+          if (msg.isError) {
+            const subtype = msg.errorSubtype ?? 'unknown';
+            const errorsDetail = msg.errors?.length ? ` — ${msg.errors.join('; ')}` : '';
+            getLog().error(
+              {
+                nodeId: node.id,
+                iteration: i,
+                errorSubtype: subtype,
+                errors: msg.errors,
+                sessionId: msg.sessionId,
+                stopReason: msg.stopReason,
+              },
+              'loop_node.iteration_sdk_error'
+            );
+            throw new Error(
+              `Loop '${node.id}' iteration ${String(i)} failed: SDK returned ${subtype}${errorsDetail}`
+            );
           }
           break; // Result is the "I'm done" signal — don't wait for subprocess to exit
         } else if (msg.type === 'tool' && msg.toolName) {
@@ -2686,15 +2758,24 @@ export async function executeDagWorkflow(
     }
   }
 
-  // Helper: bail out if the run was transitioned externally (cancelled, deleted, etc.)
+  /**
+   * Bail out of the final completion/failure write if the run was transitioned
+   * externally. Strict `!== 'running'` check is correct here because we don't
+   * want to mark a paused run as complete — the approval gate is still live.
+   *
+   * Emitter unregister is conditional: terminal states (cancelled / deleted /
+   * completed / failed) unregister to release subscription resources, but
+   * `paused` keeps the emitter registered so SSE stays connected while the
+   * approval gate awaits the user — crucial for resume observability.
+   */
   async function skipIfStatusChanged(logEvent: string): Promise<boolean> {
     const status = await deps.store.getWorkflowRunStatus(workflowRun.id);
-    if (status === null || status !== 'running') {
-      getLog().info({ workflowRunId: workflowRun.id, status: status ?? 'deleted' }, logEvent);
+    if (status === 'running') return false;
+    getLog().info({ workflowRunId: workflowRun.id, status: status ?? 'deleted' }, logEvent);
+    if (status !== 'paused') {
       getWorkflowEventEmitter().unregisterRun(workflowRun.id);
-      return true;
     }
-    return false;
+    return true;
   }
 
   // Single-pass: compute node outcome counts and derive success/failure booleans

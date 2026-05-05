@@ -2935,6 +2935,75 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       ).toBe(1);
     });
 
+    it('completes on final iteration with XML-wrapped signal (<COMPLETE>SIGNAL</COMPLETE>)', async () => {
+      let callCount = 0;
+      mockSendQueryDag.mockImplementation(function* () {
+        callCount++;
+        if (callCount < 3) {
+          yield { type: 'assistant', content: `Iteration ${String(callCount)} progress` };
+          yield { type: 'result', sessionId: `loop-session-${String(callCount)}` };
+        } else {
+          // Final iteration uses <COMPLETE> tag instead of <promise>
+          yield { type: 'assistant', content: 'All clean! <COMPLETE>ALL_CLEAN</COMPLETE>' };
+          yield { type: 'result', sessionId: `loop-session-${String(callCount)}` };
+        }
+      });
+
+      const mockDeps = createMockDeps();
+      const platform = createMockPlatform();
+      const workflowRun = makeWorkflowRun();
+
+      await executeDagWorkflow(
+        mockDeps,
+        platform,
+        'conv-dag',
+        testDir,
+        {
+          name: 'dag-loop-xml-tag',
+          nodes: [
+            {
+              id: 'fix-and-review',
+              loop: {
+                prompt: 'Fix and review. When done, output <COMPLETE>ALL_CLEAN</COMPLETE>.',
+                until: 'ALL_CLEAN',
+                max_iterations: 3,
+              },
+            },
+          ],
+        },
+        workflowRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      // 3 iterations run, signal found on iteration 3 → completed, NOT failed
+      expect(mockSendQueryDag.mock.calls.length).toBe(3);
+      expect(
+        (
+          mockDeps.store.completeWorkflowRun as Mock<
+            (id: string, metadata?: Record<string, unknown>) => Promise<void>
+          >
+        ).mock.calls.length
+      ).toBe(1);
+      expect(
+        (mockDeps.store.failWorkflowRun as Mock<(id: string, error: string) => Promise<void>>).mock
+          .calls.length
+      ).toBe(0);
+      // Verify stripping: raw XML completion tags must not appear in user-visible output
+      const allSentMessages = (
+        platform.sendMessage as Mock<(...args: unknown[]) => Promise<void>>
+      ).mock.calls
+        .map((call: unknown[]) => call[1] as string)
+        .join('');
+      expect(allSentMessages).not.toContain('<COMPLETE>');
+      expect(allSentMessages).not.toContain('</COMPLETE>');
+    });
+
     it('loop node output available to downstream nodes via $nodeId.output', async () => {
       let loopCallCount = 0;
       mockSendQueryDag.mockImplementation(function* (prompt: string) {
@@ -3592,6 +3661,70 @@ describe('executeDagWorkflow -- resume with priorCompletedNodes', () => {
       // Should have resumed with stored session ID
       const sessionArg = mockSendQueryDag.mock.calls[0][2] as string | undefined;
       expect(sessionArg).toBe('loop-session-1');
+    });
+
+    it('loop iteration fails loudly when SDK returns error_during_execution', async () => {
+      // Regression test for #1208: previously the loop silently broke on isError
+      // results and kept iterating with empty output, producing "5-second crashes"
+      // that masqueraded as successful iterations.
+      mockSendQueryDag.mockImplementation(function* () {
+        yield {
+          type: 'result',
+          isError: true,
+          errorSubtype: 'error_during_execution',
+          errors: ['Subprocess crashed mid-turn'],
+          sessionId: 'bad-session',
+        };
+      });
+
+      const store = createMockStore();
+      const mockDeps = createMockDeps(store);
+      const platform = createMockPlatform();
+      const workflowRun = makeWorkflowRun();
+
+      await executeDagWorkflow(
+        mockDeps,
+        platform,
+        'conv-dag',
+        testDir,
+        {
+          name: 'loop-iteration-err',
+          nodes: [
+            {
+              id: 'work',
+              loop: {
+                prompt: 'Do the work. Say DONE.',
+                until: 'DONE',
+                max_iterations: 5,
+              },
+            },
+          ],
+        },
+        workflowRun,
+        'claude',
+        undefined,
+        join(testDir, 'artifacts'),
+        join(testDir, 'logs'),
+        'main',
+        'docs/',
+        minimalConfig
+      );
+
+      // Should fail after one iteration rather than burning through max_iterations
+      expect(mockSendQueryDag.mock.calls.length).toBe(1);
+      // The loop_iteration_failed event should carry the subtype and SDK errors detail
+      const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+      const iterFailedEvents = eventCalls.filter(
+        (call: unknown[]) =>
+          (call[0] as Record<string, unknown>).event_type === 'loop_iteration_failed'
+      );
+      expect(iterFailedEvents.length).toBeGreaterThan(0);
+      const failedData = (iterFailedEvents[0][0] as Record<string, unknown>).data as Record<
+        string,
+        unknown
+      >;
+      expect(failedData.error).toContain('error_during_execution');
+      expect(failedData.error).toContain('Subprocess crashed mid-turn');
     });
 
     it('non-interactive loop is unaffected (no pause)', async () => {
@@ -4617,6 +4750,58 @@ describe('executeDagWorkflow -- Claude SDK advanced options', () => {
     expect(capMessage).toBeDefined();
   });
 
+  it('fails node when SDK returns error_during_execution result', async () => {
+    // Regression test for #1208: previously we only failed on error_max_budget_usd
+    // and silently broke on all other isError subtypes, letting failed nodes
+    // masquerade as successes with empty output.
+    mockSendQueryDag.mockImplementation(function* () {
+      yield {
+        type: 'result',
+        isError: true,
+        errorSubtype: 'error_during_execution',
+        errors: ['Tool call failed: permission denied'],
+        sessionId: 'sid-err',
+      };
+    });
+
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'err-exec-test',
+        nodes: [{ id: 'step1', command: 'my-cmd' }],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // The node_failed event should carry the subtype and SDK errors detail
+    const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const nodeFailedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_failed'
+    );
+    expect(nodeFailedEvents.length).toBeGreaterThan(0);
+    const failedData = (nodeFailedEvents[0][0] as Record<string, unknown>).data as Record<
+      string,
+      unknown
+    >;
+    expect(failedData.error).toContain('error_during_execution');
+    expect(failedData.error).toContain('permission denied');
+  });
+
   it('forwards workflow-level effort to node when no per-node override', async () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
@@ -5383,5 +5568,51 @@ describe('executeDagWorkflow -- script nodes', () => {
       })
     );
     execSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Streaming cancel-check policy (during-streaming paused tolerance)
+// ---------------------------------------------------------------------------
+
+describe('shouldContinueStreamingForStatus', () => {
+  it('continues when status is running', async () => {
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus('running')).toBe(true);
+  });
+
+  it('continues when status is paused (sibling approval node in same layer)', async () => {
+    // The key invariant: a concurrent approval node can pause the run while a
+    // streaming AI node is mid-response. The streaming node must finish its
+    // own output — workflow progression is gated by the approval node, not
+    // by tearing down unrelated in-flight streams.
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus('paused')).toBe(true);
+  });
+
+  it('aborts when status is null (run deleted)', async () => {
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus(null)).toBe(false);
+  });
+
+  it('aborts when status is cancelled', async () => {
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus('cancelled')).toBe(false);
+  });
+
+  it('aborts when status is failed', async () => {
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus('failed')).toBe(false);
+  });
+
+  it('aborts when status is completed', async () => {
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus('completed')).toBe(false);
+  });
+
+  it('aborts on any unrecognized state', async () => {
+    const { shouldContinueStreamingForStatus } = await import('./dag-executor');
+    expect(shouldContinueStreamingForStatus('pending')).toBe(false);
+    expect(shouldContinueStreamingForStatus('invalid-status')).toBe(false);
   });
 });

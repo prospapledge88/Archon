@@ -281,7 +281,10 @@ async function dispatchOrchestratorWorkflow(
         workflow,
         userMessage,
         conversation.id,
-        codebase.id
+        codebase.id,
+        undefined, // issueContext
+        undefined, // isolationContext
+        conversation.id // parentConversationId — enables approve/reject auto-resume
       );
     } else if (workflow.interactive) {
       // Interactive workflows run in foreground so output stays in the user's conversation
@@ -293,7 +296,10 @@ async function dispatchOrchestratorWorkflow(
         workflow,
         userMessage,
         conversation.id,
-        codebase.id
+        codebase.id,
+        undefined, // issueContext
+        undefined, // isolationContext
+        conversation.id // parentConversationId — enables approve/reject auto-resume
       );
     } else {
       await dispatchBackgroundWorkflow(
@@ -319,7 +325,10 @@ async function dispatchOrchestratorWorkflow(
       workflow,
       userMessage,
       conversation.id,
-      codebase.id
+      codebase.id,
+      undefined, // issueContext
+      undefined, // isolationContext
+      conversation.id // parentConversationId — enables approve/reject auto-resume
     );
   }
 }
