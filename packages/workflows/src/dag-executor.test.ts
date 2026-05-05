@@ -1180,6 +1180,54 @@ describe('executeDagWorkflow -- bash nodes', () => {
     expect(failMsg).toBeDefined();
   });
 
+  it('failure message surfaces stderr and does not leak the "Command failed: bash -c <body>" prefix', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('bash-1389-run-id', {
+      workflow_name: 'bash-1389',
+      conversation_id: 'conv-1389b',
+      user_message: 'test',
+    });
+
+    // Marker is echoed to stdout only (so it lands in the command line embedded
+    // in err.message but never in stderr). If it shows up in errorMsg the
+    // prefix line was not stripped.
+    const bashNode: BashNode = {
+      id: 'fail-bash-1389',
+      bash: 'echo UNIQUE_CMDLINE_MARKER_1389; echo "diagnostic from stderr" >&2; exit 1',
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-1389b',
+      testDir,
+      { name: 'bash-1389', nodes: [bashNode] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const eventCalls = (mockDeps.store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const failedEvent = eventCalls.find(
+      (call: unknown[]) =>
+        (call[0] as { event_type: string }).event_type === 'node_failed' &&
+        (call[0] as { step_name: string }).step_name === 'fail-bash-1389'
+    );
+    expect(failedEvent).toBeDefined();
+    const errorMsg = (failedEvent![0] as { data: { error: string } }).data.error;
+    expect(errorMsg).toContain("Bash node 'fail-bash-1389' failed");
+    expect(errorMsg).toContain('[exit 1]');
+    expect(errorMsg).not.toContain('Command failed:');
+    expect(errorMsg).not.toContain('UNIQUE_CMDLINE_MARKER_1389');
+    expect(errorMsg).toContain('diagnostic from stderr');
+  });
+
   it('variable substitution works in bash scripts', async () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
@@ -5093,6 +5141,76 @@ describe('executeDagWorkflow -- approval node', () => {
     expect(pauseCalls.length).toBe(1);
   });
 
+  it('on_reject does not write node_completed for the approval gate node ID', async () => {
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'Fixed based on feedback' };
+      yield { type: 'result', sessionId: 'reject-no-poison-session' };
+    });
+
+    const store = createMockStore();
+    const mockDeps = createMockDeps(store);
+    const platform = createMockPlatform();
+
+    const workflowRun = makeWorkflowRun('reject-no-poison-run', {
+      metadata: {
+        approval: {
+          type: 'approval',
+          nodeId: 'review',
+          message: 'Approve this plan?',
+          onRejectPrompt: 'Fix based on: $REJECTION_REASON',
+          onRejectMaxAttempts: 3,
+        },
+        rejection_reason: 'Missing edge case handling',
+        rejection_count: 1,
+      },
+    });
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-approval',
+      testDir,
+      {
+        name: 'approval-no-poison',
+        nodes: [
+          {
+            id: 'review',
+            approval: {
+              message: 'Approve this plan?',
+              on_reject: { prompt: 'Fix based on: $REJECTION_REASON', max_attempts: 3 },
+            },
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // The on_reject synthetic node must NOT produce a node_completed event with
+    // step_name equal to the approval gate's own ID ('review'). If it did, a
+    // subsequent resume would find the event via getCompletedDagNodeOutputs and
+    // skip the approval gate entirely, bypassing the human gate.
+    const eventCalls = (store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const nodeCompletedEvents = eventCalls.filter(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).event_type === 'node_completed'
+    );
+    const completedStepNames = nodeCompletedEvents.map(
+      (call: unknown[]) => (call[0] as Record<string, unknown>).step_name
+    );
+    expect(completedStepNames).not.toContain('review');
+
+    // The synthetic on_reject node MUST produce a node_completed event with the
+    // distinct ID 'review:on_reject'. This ensures the synthetic node itself is
+    // recorded as completed so it is not re-run on a subsequent resume.
+    expect(completedStepNames.filter((n: unknown) => n === 'review:on_reject').length).toBe(1);
+  });
+
   it('on_reject cancels when max_attempts exhausted', async () => {
     const store = createMockStore();
     const mockDeps = createMockDeps(store);
@@ -6098,6 +6216,60 @@ describe('executeDagWorkflow -- script nodes', () => {
     expect(failMsg).toBeDefined();
   });
 
+  it('failure message strips the "Command failed: bun -e <body>" prefix and stays small', async () => {
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('script-1389-run-id', {
+      workflow_name: 'script-1389',
+      conversation_id: 'conv-1389s',
+      user_message: 'test',
+    });
+
+    // 200 × 16 chars ≈ 3.2 KB — larger than SUBPROCESS_ERROR_MAX_CHARS (2 KB),
+    // so any leak of the script body via err.message would violate the length
+    // assertion below. Bun's stderr echoes only a few lines of context.
+    const paddingAboveMax = '// padding line '.repeat(200);
+    const scriptNode: ScriptNode = {
+      id: 'fail-script-1389',
+      script: `${paddingAboveMax}\nconst x = "marker"; this is not valid javascript`,
+      runtime: 'bun',
+    };
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-1389s',
+      testDir,
+      { name: 'script-1389', nodes: [scriptNode] },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    const eventCalls = (mockDeps.store.createWorkflowEvent as ReturnType<typeof mock>).mock.calls;
+    const failedEvent = eventCalls.find(
+      (call: unknown[]) =>
+        (call[0] as { event_type: string }).event_type === 'node_failed' &&
+        (call[0] as { step_name: string }).step_name === 'fail-script-1389'
+    );
+    expect(failedEvent).toBeDefined();
+    const errorMsg = (failedEvent![0] as { data: { error: string } }).data.error;
+    expect(errorMsg).toContain("Script node 'fail-script-1389' failed");
+    expect(errorMsg).not.toContain('Command failed:');
+    expect(errorMsg).not.toContain('padding line padding line padding line');
+    // 2 KB diagnostic cap + label prefix + truncation marker should stay under
+    // 2.1 KB. Bumping SUBPROCESS_ERROR_MAX_CHARS would trip this.
+    expect(errorMsg.length).toBeLessThan(2100);
+    // Bun emits `error: <description>\n    at [eval]:L:C` for parse failures —
+    // the location marker is the strongest signal that the diagnostic survived.
+    expect(errorMsg).toContain('[eval]');
+  });
+
   it('timeout kills subprocess', async () => {
     const mockDeps = createMockDeps();
     const platform = createMockPlatform();
@@ -6393,5 +6565,378 @@ describe('shouldContinueStreamingForStatus', () => {
     const { shouldContinueStreamingForStatus } = await import('./dag-executor');
     expect(shouldContinueStreamingForStatus('pending')).toBe(false);
     expect(shouldContinueStreamingForStatus('invalid-status')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP plugin-noise filtering helpers
+// ---------------------------------------------------------------------------
+
+describe('parseMcpFailureServerNames', () => {
+  it('extracts entries (name + segment) from a well-formed message', async () => {
+    const { parseMcpFailureServerNames } = await import('./dag-executor');
+    const entries = parseMcpFailureServerNames(
+      'MCP server connection failed: telegram (disconnected), github (timeout)'
+    );
+    expect(entries).toEqual([
+      { name: 'telegram', segment: 'telegram (disconnected)' },
+      { name: 'github', segment: 'github (timeout)' },
+    ]);
+  });
+
+  it('returns empty array for unrelated messages', async () => {
+    const { parseMcpFailureServerNames } = await import('./dag-executor');
+    expect(parseMcpFailureServerNames('⚠️ Something else')).toEqual([]);
+    expect(parseMcpFailureServerNames('')).toEqual([]);
+  });
+
+  it('deduplicates repeated entries (first segment wins)', async () => {
+    const { parseMcpFailureServerNames } = await import('./dag-executor');
+    const entries = parseMcpFailureServerNames(
+      'MCP server connection failed: foo (a), foo (b), bar (c)'
+    );
+    expect(entries).toEqual([
+      { name: 'foo', segment: 'foo (a)' },
+      { name: 'bar', segment: 'bar (c)' },
+    ]);
+  });
+
+  it('handles a single entry without status parens gracefully', async () => {
+    const { parseMcpFailureServerNames } = await import('./dag-executor');
+    expect(parseMcpFailureServerNames('MCP server connection failed: solo')).toEqual([
+      { name: 'solo', segment: 'solo' },
+    ]);
+  });
+
+  it('drops empty segments from trailing/leading commas', async () => {
+    const { parseMcpFailureServerNames } = await import('./dag-executor');
+    expect(parseMcpFailureServerNames('MCP server connection failed: a (x), , b (y)')).toEqual([
+      { name: 'a', segment: 'a (x)' },
+      { name: 'b', segment: 'b (y)' },
+    ]);
+  });
+});
+
+describe('loadConfiguredMcpServerNames', () => {
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = join(tmpdir(), `mcp-names-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    await mkdir(testDir, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await rm(testDir, { recursive: true, force: true });
+  });
+
+  it('returns empty set when nodeMcpPath is undefined', async () => {
+    const { loadConfiguredMcpServerNames } = await import('./dag-executor');
+    const names = await loadConfiguredMcpServerNames(undefined, testDir);
+    expect(names.size).toBe(0);
+  });
+
+  it('returns server names for a valid JSON config (relative path)', async () => {
+    const { loadConfiguredMcpServerNames } = await import('./dag-executor');
+    await writeFile(
+      join(testDir, 'mcp.json'),
+      JSON.stringify({ foo: { command: 'x' }, bar: { command: 'y' } })
+    );
+    const names = await loadConfiguredMcpServerNames('mcp.json', testDir);
+    expect([...names].sort()).toEqual(['bar', 'foo']);
+  });
+
+  it('returns server names for an absolute path', async () => {
+    const { loadConfiguredMcpServerNames } = await import('./dag-executor');
+    const absolutePath = join(testDir, 'abs.json');
+    await writeFile(absolutePath, JSON.stringify({ baz: {} }));
+    const names = await loadConfiguredMcpServerNames(absolutePath, '/nonexistent/cwd');
+    expect([...names]).toEqual(['baz']);
+  });
+
+  it('returns empty set when file is missing (no crash)', async () => {
+    const { loadConfiguredMcpServerNames } = await import('./dag-executor');
+    const names = await loadConfiguredMcpServerNames('missing.json', testDir);
+    expect(names.size).toBe(0);
+  });
+
+  it('returns empty set for invalid JSON (provider surfaces its own error)', async () => {
+    const { loadConfiguredMcpServerNames } = await import('./dag-executor');
+    await writeFile(join(testDir, 'broken.json'), '{ not-json');
+    const names = await loadConfiguredMcpServerNames('broken.json', testDir);
+    expect(names.size).toBe(0);
+  });
+
+  it('returns empty set when JSON is an array (not an object of servers)', async () => {
+    const { loadConfiguredMcpServerNames } = await import('./dag-executor');
+    await writeFile(join(testDir, 'arr.json'), '["foo","bar"]');
+    const names = await loadConfiguredMcpServerNames('arr.json', testDir);
+    expect(names.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MCP plugin-noise filtering — end-to-end through executeDagWorkflow
+// ---------------------------------------------------------------------------
+
+describe('executeDagWorkflow -- MCP failure filtering', () => {
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = join(tmpdir(), `dag-mcp-filter-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const commandsDir = join(testDir, '.archon', 'commands');
+    await mkdir(commandsDir, { recursive: true });
+    await writeFile(join(commandsDir, 'my-cmd.md'), 'cmd prompt');
+
+    mockSendQueryDag.mockClear();
+    mockGetAgentProviderDag.mockClear();
+  });
+
+  afterEach(async () => {
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+    try {
+      await rm(testDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  async function runWithSystemChunk(
+    systemContent: string,
+    nodeMcpPath?: string
+  ): Promise<IWorkflowPlatform> {
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'system', content: systemContent };
+      yield { type: 'assistant', content: 'ok' };
+      yield { type: 'result', sessionId: 'sess' };
+    });
+
+    const platform = createMockPlatform();
+    await executeDagWorkflow(
+      createMockDeps(),
+      platform,
+      'conv-mcp-filter',
+      testDir,
+      {
+        name: 'mcp-filter-test',
+        nodes: [{ id: 'review', command: 'my-cmd', ...(nodeMcpPath ? { mcp: nodeMcpPath } : {}) }],
+      },
+      makeWorkflowRun(),
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+    return platform;
+  }
+
+  function mcpMessages(platform: IWorkflowPlatform): string[] {
+    const calls = (platform.sendMessage as Mock<typeof platform.sendMessage>).mock.calls;
+    return calls
+      .map(c => c[1] as string)
+      .filter(m => m.startsWith('MCP server connection failed:') || m.startsWith('⚠️'));
+  }
+
+  it('forwards only workflow-configured failures and preserves status detail', async () => {
+    await writeFile(join(testDir, 'mcp.json'), JSON.stringify({ 'workflow-server': {} }));
+    const platform = await runWithSystemChunk(
+      'MCP server connection failed: workflow-server (timeout), telegram (disconnected)',
+      'mcp.json'
+    );
+
+    const sent = mcpMessages(platform);
+    expect(sent).toEqual(['MCP server connection failed: workflow-server (timeout)']);
+  });
+
+  it('suppresses MCP message entirely when all failures are user plugins', async () => {
+    await writeFile(join(testDir, 'mcp.json'), JSON.stringify({ 'workflow-server': {} }));
+    const platform = await runWithSystemChunk(
+      'MCP server connection failed: telegram (disconnected), notion (timeout)',
+      'mcp.json'
+    );
+
+    expect(mcpMessages(platform)).toEqual([]);
+  });
+
+  it('suppresses everything when node has no mcp: config (all failures are plugin noise)', async () => {
+    const platform = await runWithSystemChunk(
+      'MCP server connection failed: telegram (disconnected)'
+    );
+
+    expect(mcpMessages(platform)).toEqual([]);
+  });
+
+  it('forwards ⚠️ provider warnings verbatim', async () => {
+    const platform = await runWithSystemChunk('⚠️ Haiku does not support MCP');
+
+    expect(mcpMessages(platform)).toEqual(['⚠️ Haiku does not support MCP']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final status derivation (anyFailed branch coverage)
+// ---------------------------------------------------------------------------
+
+describe('executeDagWorkflow -- final status derivation', () => {
+  // Invariant: if ANY non-skipped node has failed status, the run must be
+  // marked 'failed' — never 'completed' — regardless of how many other nodes
+  // succeeded. This covers the anyFailed branch in executeDagWorkflow
+  // (dag-executor.ts ~line 2956), which had no direct test coverage.
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = join(
+      tmpdir(),
+      `dag-status-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    await mkdir(testDir, { recursive: true });
+
+    mockSendQueryDag.mockClear();
+    mockGetAgentProviderDag.mockClear();
+    mockSendQueryDag.mockImplementation(function* () {
+      yield { type: 'assistant', content: 'DAG AI response' };
+      yield { type: 'result', sessionId: 'dag-session-id' };
+    });
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+  });
+
+  afterEach(async () => {
+    try {
+      await rm(testDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it('one success + one independent failure -> failWorkflowRun, not completeWorkflowRun', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-status-run-1');
+
+    const nodes: DagNode[] = [
+      { id: 'pass', bash: 'echo ok' } as BashNode,
+      { id: 'fail', bash: 'exit 1' } as BashNode,
+    ];
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-status',
+      testDir,
+      { name: 'status-test', nodes },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect((mockStore.failWorkflowRun as ReturnType<typeof mock>).mock.calls.length).toBe(1);
+    expect((mockStore.completeWorkflowRun as ReturnType<typeof mock>).mock.calls.length).toBe(0);
+    expect(mockStore.failWorkflowRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('fail')
+    );
+
+    // Confirm the failure message names the failing node
+    const sendMessage = platform.sendMessage as ReturnType<typeof mock>;
+    const messages = sendMessage.mock.calls.map((call: unknown[]) => call[1] as string);
+    const failMsg = messages.find((m: string) => m.includes('completed with failures'));
+    expect(failMsg).toBeDefined();
+  });
+
+  it('multiple successes + one failure -> failWorkflowRun, not completeWorkflowRun', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-status-run-2');
+
+    const nodes: DagNode[] = [
+      { id: 'a', bash: 'echo a' } as BashNode,
+      { id: 'b', bash: 'echo b' } as BashNode,
+      { id: 'c', bash: 'echo c' } as BashNode,
+      { id: 'fail', bash: 'exit 1' } as BashNode,
+    ];
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-status',
+      testDir,
+      { name: 'status-test-multi', nodes },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect((mockStore.failWorkflowRun as ReturnType<typeof mock>).mock.calls.length).toBe(1);
+    expect((mockStore.completeWorkflowRun as ReturnType<typeof mock>).mock.calls.length).toBe(0);
+    expect(mockStore.failWorkflowRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('fail')
+    );
+
+    const sendMessage = platform.sendMessage as ReturnType<typeof mock>;
+    const messages = sendMessage.mock.calls.map((call: unknown[]) => call[1] as string);
+    const failMsg = messages.find((m: string) => m.includes('completed with failures'));
+    expect(failMsg).toBeDefined();
+  });
+
+  it('trigger_rule: none_failed skips dependent node + anyFailed still marks run failed', async () => {
+    const mockStore = createMockStore();
+    const mockDeps = createMockDeps(mockStore);
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun('dag-status-run-3');
+
+    // Layer 1: A and B run in parallel. B fails.
+    // Layer 2: C depends on B with trigger_rule: none_failed — so C is skipped.
+    // Expected: anyFailed=true (from B), so run must be marked failed even though C is only skipped.
+    const nodes: DagNode[] = [
+      { id: 'a', bash: 'echo a' } as BashNode,
+      { id: 'b', bash: 'exit 1' } as BashNode,
+      { id: 'c', bash: 'echo c', depends_on: ['b'], trigger_rule: 'none_failed' } as BashNode,
+    ];
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-status',
+      testDir,
+      { name: 'status-test-skip', nodes },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    expect((mockStore.failWorkflowRun as ReturnType<typeof mock>).mock.calls.length).toBe(1);
+    expect((mockStore.completeWorkflowRun as ReturnType<typeof mock>).mock.calls.length).toBe(0);
+    expect(mockStore.failWorkflowRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.stringContaining('b')
+    );
   });
 });

@@ -6,7 +6,7 @@
  * Captures all assistant output regardless of streaming mode for $node_id.output substitution.
  */
 import { readFile } from 'fs/promises';
-import { join } from 'path';
+import { isAbsolute, join, resolve as resolvePath } from 'path';
 import { execFileAsync } from '@archon/git';
 import { discoverScriptsForCwd } from './script-discovery';
 import type {
@@ -73,6 +73,7 @@ import {
   detectCompletionSignal,
   stripCompletionTags,
   isInlineScript,
+  formatSubprocessFailure,
 } from './executor-shared';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
@@ -80,6 +81,69 @@ let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
   if (!cachedLog) cachedLog = createLogger('workflow.dag-executor');
   return cachedLog;
+}
+
+const MCP_FAILURE_PREFIX = 'MCP server connection failed: ';
+
+/** A failed MCP server entry parsed from the SDK message. `segment` is the
+ *  original substring (e.g. `"telegram (disconnected)"`) so callers can
+ *  reconstruct a filtered message without losing the status detail. */
+export interface McpFailureEntry {
+  name: string;
+  segment: string;
+}
+
+/**
+ * Parse the SDK's "MCP server connection failed: a (status), b (status)"
+ * message. Best-effort — malformed or prefix-free messages return `[]`.
+ * Entries are ordered and deduped by name; the segment of the first
+ * occurrence wins.
+ */
+export function parseMcpFailureServerNames(message: string): McpFailureEntry[] {
+  if (!message.startsWith(MCP_FAILURE_PREFIX)) return [];
+  const seen = new Set<string>();
+  const entries: McpFailureEntry[] = [];
+  for (const raw of message.slice(MCP_FAILURE_PREFIX.length).split(', ')) {
+    const segment = raw.trim();
+    const name = segment.split(' (')[0]?.trim();
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      entries.push({ name, segment });
+    }
+  }
+  return entries;
+}
+
+/**
+ * Load the set of MCP server names that a node's `mcp:` config file declares.
+ *
+ * Returns an empty set when no `mcp:` is configured or when the file can't be
+ * read/parsed. Used to distinguish workflow-configured failures (surface to
+ * user) from user-plugin failures (silent debug log). We intentionally do not
+ * validate or env-expand here — the provider owns full loading and will
+ * surface its own parse errors via the warning channel if the file is broken.
+ *
+ * Read failures are debug-logged so a transient I/O error (EMFILE/EBUSY) that
+ * leaves us with an empty set — and silently reclassifies a real workflow-MCP
+ * failure as plugin noise — is at least observable.
+ */
+export async function loadConfiguredMcpServerNames(
+  nodeMcpPath: string | undefined,
+  cwd: string
+): Promise<Set<string>> {
+  if (!nodeMcpPath) return new Set();
+  const fullPath = isAbsolute(nodeMcpPath) ? nodeMcpPath : resolvePath(cwd, nodeMcpPath);
+  try {
+    const raw = await readFile(fullPath, 'utf-8');
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(Object.keys(parsed as Record<string, unknown>));
+  } catch (err) {
+    getLog().debug({ err, nodeMcpPath, fullPath }, 'dag.mcp_filter_config_read_failed');
+    return new Set();
+  }
 }
 
 /** Workflow-level Claude SDK options — per-node overrides take precedence via ?? */
@@ -523,6 +587,8 @@ async function executeNodeInternal(
   const nodeStartTime = Date.now();
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
 
+  const configuredMcpNames = await loadConfiguredMcpServerNames(node.mcp, cwd);
+
   getLog().info({ nodeId: node.id, provider }, 'dag_node_started');
   await logNodeStart(logDir, workflowRun.id, node.id, node.command ?? '<inline>');
 
@@ -846,13 +912,43 @@ async function executeNodeInternal(
         }
         break; // Result is the "I'm done" signal — don't wait for subprocess to exit
       } else if (msg.type === 'system' && msg.content) {
-        // Forward provider warnings (⚠️) and MCP connection failures to the user.
-        // Providers yield system chunks for user-actionable issues (missing env vars,
-        // Haiku+MCP, structured output failures, etc.)
-        if (
-          msg.content.startsWith('MCP server connection failed:') ||
-          msg.content.startsWith('⚠️')
-        ) {
+        // Providers yield system chunks for user-actionable issues (missing env
+        // vars, Haiku+MCP, structured output failures, etc.). MCP-failure
+        // chunks need filtering: user-level plugin MCPs inherited from
+        // `~/.claude/` (e.g. `telegram`) routinely fail to connect inside the
+        // headless subprocess and aren't actionable for the workflow author.
+        // Other warnings (⚠️) are always actionable and surface verbatim.
+        if (msg.content.startsWith(MCP_FAILURE_PREFIX)) {
+          const failedEntries = parseMcpFailureServerNames(msg.content);
+          const workflowFailures = failedEntries.filter(e => configuredMcpNames.has(e.name));
+          const pluginFailures = failedEntries.filter(e => !configuredMcpNames.has(e.name));
+
+          if (workflowFailures.length > 0) {
+            const filteredMsg = `${MCP_FAILURE_PREFIX}${workflowFailures.map(e => e.segment).join(', ')}`;
+            getLog().warn(
+              { nodeId: node.id, systemContent: filteredMsg },
+              'dag.provider_warning_forwarded'
+            );
+            const delivered = await safeSendMessage(
+              platform,
+              conversationId,
+              filteredMsg,
+              nodeContext
+            );
+            if (!delivered) {
+              getLog().error(
+                { nodeId: node.id, workflowRunId: workflowRun.id },
+                'dag.provider_warning_delivery_failed'
+              );
+            }
+          }
+          if (pluginFailures.length > 0) {
+            getLog().debug(
+              { nodeId: node.id, pluginFailures: pluginFailures.map(e => e.name) },
+              'dag.mcp_plugin_connection_suppressed'
+            );
+          }
+        } else if (msg.content.startsWith('⚠️')) {
           getLog().warn(
             { nodeId: node.id, systemContent: msg.content },
             'dag.provider_warning_forwarded'
@@ -1271,20 +1367,28 @@ async function executeBashNode(
 
     return { state: 'completed', output };
   } catch (error) {
-    const err = error as Error & { killed?: boolean; code?: number | string };
+    const err = error as Error & { killed?: boolean; code?: number | string; stderr?: string };
     const isTimeout = err.killed === true || (err.message ?? '').includes('timed out');
+    const label = `Bash node '${node.id}'`;
+    // Always run the formatter so logs get sanitized fields regardless of which
+    // user-facing branch we end up in — the timeout message also contains the
+    // full `Command failed: bash -c <body>` line and would otherwise leak.
+    const formatted = formatSubprocessFailure(err, label);
     let errorMsg: string;
     if (isTimeout) {
-      errorMsg = `Bash node '${node.id}' timed out after ${String(timeout)}ms`;
+      errorMsg = `${label} timed out after ${String(timeout)}ms`;
     } else if (err.message?.includes('ENOENT')) {
-      errorMsg = `Bash node '${node.id}' failed: bash executable not found in PATH`;
+      errorMsg = `${label} failed: bash executable not found in PATH`;
     } else if (err.message?.includes('EACCES')) {
-      errorMsg = `Bash node '${node.id}' failed: permission denied (check cwd permissions)`;
+      errorMsg = `${label} failed: permission denied (check cwd permissions)`;
     } else {
-      errorMsg = `Bash node '${node.id}' failed: ${err.message}`;
+      errorMsg = formatted.userMessage;
     }
 
-    getLog().error({ err, nodeId: node.id, isTimeout }, 'dag_node_failed');
+    getLog().error(
+      { ...formatted.logFields, nodeId: node.id, nodeType: 'bash', isTimeout },
+      'dag_node_failed'
+    );
     await logNodeError(logDir, workflowRun.id, node.id, errorMsg);
 
     deps.store
@@ -1533,19 +1637,26 @@ async function executeScriptNode(
   } catch (error) {
     const err = error as Error & { killed?: boolean; code?: number | string; stderr?: string };
     const isTimeout = err.killed === true || (err.message ?? '').includes('timed out');
-    const stderrHint = err.stderr?.trim() ? `\n\nScript output:\n${err.stderr.trim()}` : '';
+    const label = `Script node '${node.id}'`;
+    // Always run the formatter so logs get sanitized fields regardless of which
+    // user-facing branch we end up in — the timeout message also contains the
+    // full `Command failed: bun -e <body>` line and would otherwise leak.
+    const formatted = formatSubprocessFailure(err, label);
     let errorMsg: string;
     if (isTimeout) {
-      errorMsg = `Script node '${node.id}' timed out after ${String(timeout)}ms`;
+      errorMsg = `${label} timed out after ${String(timeout)}ms`;
     } else if (err.message?.includes('ENOENT')) {
-      errorMsg = `Script node '${node.id}' failed: '${cmd}' executable not found in PATH`;
+      errorMsg = `${label} failed: '${cmd}' executable not found in PATH`;
     } else if (err.message?.includes('EACCES')) {
-      errorMsg = `Script node '${node.id}' failed: permission denied (check cwd permissions)`;
+      errorMsg = `${label} failed: permission denied (check cwd permissions)`;
     } else {
-      errorMsg = `Script node '${node.id}' failed: ${err.message}${stderrHint}`;
+      errorMsg = formatted.userMessage;
     }
 
-    getLog().error({ err, nodeId: node.id, isTimeout }, 'dag_node_failed');
+    getLog().error(
+      { ...formatted.logFields, nodeId: node.id, nodeType: 'script', isTimeout },
+      'dag_node_failed'
+    );
     await logNodeError(logDir, workflowRun.id, node.id, errorMsg);
 
     deps.store
@@ -2271,9 +2382,21 @@ async function executeApprovalNode(
       projectKnowledge
     );
 
-    // Build a synthetic PromptNode to reuse executeNodeInternal
+    // Build a synthetic PromptNode to reuse executeNodeInternal.
+    // Use a distinct ID so the node_completed event written by executeNodeInternal
+    // does not collide with the approval gate's own ID in getCompletedDagNodeOutputs.
+    // If we used node.id here, a resumed run would find the event and treat the
+    // approval gate as already completed, bypassing the human gate entirely.
+    //
+    // Note: executeNodeInternal also emits node_started/node_completed WorkflowEmitterEvents
+    // with nodeId = `${node.id}:on_reject`. These flow through SSE into the web UI, where
+    // WorkflowExecution.tsx builds its nodeMap from all node_* events unconditionally.
+    // This means a transient `${node.id}:on_reject` phantom entry may appear in the UI's
+    // execution view during an on_reject cycle. This is cosmetic-only — the approval gate
+    // still re-presents correctly and the human gate contract is preserved. A follow-up can
+    // filter synthetic `:on_reject` IDs from the UI's nodeMap if needed.
     const syntheticNode: PromptNode = {
-      id: node.id,
+      id: `${node.id}:on_reject`,
       prompt: substituteNodeOutputRefs(substitutedPrompt, nodeOutputs),
       ...(node.depends_on ? { depends_on: node.depends_on } : {}),
       ...(node.idle_timeout ? { idle_timeout: node.idle_timeout } : {}),
