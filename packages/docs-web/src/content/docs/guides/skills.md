@@ -124,7 +124,7 @@ Step-by-step content here. The agent loads this when the skill activates.
 ## Skill Discovery
 
 Skills are discovered from these locations (via `settingSources: ['project']`
-set in ClaudeClient):
+set in ClaudeProvider):
 
 | Location | Scope |
 |----------|-------|
@@ -166,6 +166,7 @@ smaller box with a tastefully curated set of tools."
 
 | Skill | Install | What It Teaches |
 |-------|---------|----------------|
+| `archon` (bundled) | `archon skill install` | Archon workflows, commands, and project conventions |
 | `remotion-best-practices` | `npx skills add remotion-dev/skills` | Remotion animation patterns, API usage, gotchas (35 rules) |
 | `skill-creator` | `npx skills add anthropics/skills` | How to create new SKILL.md files |
 | Community skills | Browse [skills.sh](https://skills.sh) | Search 500K+ skills for any domain |
@@ -235,6 +236,7 @@ To use skills, ensure the node uses Claude (the default provider, or set
 
 ## Related
 
+- [Inline sub-agents](/guides/authoring-workflows/#inline-sub-agents) — `agents:` field for workflow-scoped sub-agents (composes with `skills:` on the same node; user-defined agents win on ID collision with the internal `dag-node-skills` wrapper)
 - [Per-Node MCP Servers](/guides/mcp-servers/) — `mcp:` field for external tool access
 - [Hooks](/guides/hooks/) — `hooks:` field for tool permission control
 - [skills.sh](https://skills.sh) — marketplace for discovering skills

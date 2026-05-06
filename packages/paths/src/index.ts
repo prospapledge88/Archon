@@ -4,8 +4,15 @@ export {
   isDocker,
   getArchonHome,
   getArchonWorkspacesPath,
+  ensureArchonWorkspacesPath,
   getArchonWorktreesPath,
   getArchonConfigPath,
+  getArchonEnvPath,
+  getRepoArchonEnvPath,
+  getHomeWorkflowsPath,
+  getHomeCommandsPath,
+  getHomeScriptsPath,
+  getLegacyHomeWorkflowsPath,
   getCommandFolderSearchPaths,
   getWorkflowFolderSearchPaths,
   getAppArchonBasePath,
@@ -43,3 +50,7 @@ export {
   parseLatestRelease,
 } from './update-check';
 export type { UpdateCheckResult } from './update-check';
+
+// Anonymous telemetry
+export { captureWorkflowInvoked, shutdownTelemetry, isTelemetryDisabled } from './telemetry';
+export type { WorkflowInvokedProperties } from './telemetry';

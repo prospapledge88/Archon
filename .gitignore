@@ -44,6 +44,7 @@ e2e-screenshots/
 # Archon logs and artifacts (generated at runtime)
 .archon/logs/
 .archon/artifacts/
+.archon/knowledge/
 
 # Agent artifacts (generated, local only)
 .agents/
@@ -54,6 +55,7 @@ e2e-screenshots/
 .claude/archon/
 .claude/mockups/
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 e2e-testing-findings-session2.md
 
 # Local workspace

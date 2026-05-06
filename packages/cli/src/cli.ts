@@ -7,28 +7,21 @@
  *   archon workflow run <name> [msg]  Run a workflow
  *   archon version                    Show version info
  */
+// Must be the very first import — strips Bun-auto-loaded CWD .env keys before
+// any module reads process.env at init time (e.g. @archon/paths/logger reads LOG_LEVEL).
+import '@archon/paths/strip-cwd-env-boot';
+// Then load archon-owned env from ~/.archon/.env (user scope) and
+// <cwd>/.archon/.env (repo scope, wins over user). Both with override: true.
+// See packages/paths/src/env-loader.ts and the three-path model (#1302 / #1303).
+import { loadArchonEnv } from '@archon/paths/env-loader';
+loadArchonEnv(process.cwd());
+
 import { parseArgs } from 'util';
-import { config } from 'dotenv';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
 
-// Load .env from global Archon config (override: true so ~/.archon/.env
-// always wins over any Bun-auto-loaded CWD vars).
-//
-// Credential safety: target repo .env keys that Bun auto-loads from CWD
-// cannot leak into AI subprocesses — SUBPROCESS_ENV_ALLOWLIST blocks them.
-// The env-leak gate provides a second layer by scanning target repos before
-// spawning. No CWD stripping needed.
-const globalEnvPath = resolve(process.env.HOME ?? '~', '.archon', '.env');
-if (existsSync(globalEnvPath)) {
-  const result = config({ path: globalEnvPath, override: true });
-  if (result.error) {
-    // Logger may not be available yet (early startup), so use console for user-facing error
-    console.error(`Error loading .env from ${globalEnvPath}: ${result.error.message}`);
-    console.error('Hint: Check for syntax errors in your .env file.');
-    process.exit(1);
-  }
-}
+// CLAUDECODE=1 warning is emitted inside stripCwdEnv() (boot import above)
+// BEFORE the marker is deleted from process.env. No duplicate warning here.
 
 // Smart defaults for Claude auth
 // If no explicit tokens, default to global auth from `claude /login`
@@ -39,6 +32,10 @@ if (!process.env.CLAUDE_API_KEY && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
 }
 
 // DATABASE_URL is no longer required - SQLite will be used as default
+
+// Bootstrap provider registry before any provider lookups
+import { registerBuiltinProviders } from '@archon/providers';
+registerBuiltinProviders();
 
 // Import commands after dotenv is loaded
 import { versionCommand } from './commands/version';
@@ -64,8 +61,10 @@ import {
 import { continueCommand } from './commands/continue';
 import { chatCommand } from './commands/chat';
 import { setupCommand } from './commands/setup';
+import { skillInstallCommand } from './commands/skill';
 import { validateWorkflowsCommand, validateCommandsCommand } from './commands/validate';
 import { serveCommand } from './commands/serve';
+import { doctorCommand } from './commands/doctor';
 import { closeDatabase } from '@archon/core';
 import {
   setLogLevel,
@@ -73,6 +72,7 @@ import {
   checkForUpdate,
   BUNDLED_IS_BINARY,
   BUNDLED_VERSION,
+  shutdownTelemetry,
 } from '@archon/paths';
 import * as git from '@archon/git';
 
@@ -105,9 +105,11 @@ Commands:
   continue <branch> [msg]    Continue work on an existing worktree with prior context
   complete <branch> [...]    Complete branch lifecycle (remove worktree + branches)
   serve                      Start the web UI server (downloads web UI on first run)
+  skill install [path]       Install the bundled Archon skill into .claude/skills/archon
+  doctor                     Verify your Archon setup (Claude binary, gh auth, DB, adapters)
   validate workflows [name]  Validate workflow definitions and their references
   validate commands [name]   Validate command files
-  version                    Show version info
+  version, --version, -V     Show version info (also -v when used alone)
   help                       Show this help message
 
 Options:
@@ -122,9 +124,6 @@ Options:
   --json                     Output machine-readable JSON (for workflow list)
   --workflow <name>          Workflow to run for 'continue' (default: archon-assist)
   --no-context               Skip context injection for 'continue'
-  --allow-env-keys           Grant env-key consent during auto-registration
-                             (bypasses the env-leak gate for this codebase;
-                             logs an audit entry)
   --port <port>              Override server port for 'serve' (default: 3090)
   --download-only            Download web UI without starting the server
 
@@ -136,6 +135,8 @@ Examples:
   archon workflow run implement --branch feature-auth "Implement auth"
   archon workflow run quick-fix --no-worktree "Fix typo"
   archon continue fix/issue-42 --workflow archon-smart-pr-review "Review the changes"
+  archon skill install
+  archon skill install /path/to/project
 `);
 }
 
@@ -170,6 +171,21 @@ async function printUpdateNotice(quiet: boolean | undefined): Promise<void> {
  * Main CLI entry point
  * Returns exit code (0 = success, non-zero = failure)
  */
+/**
+ * Detect a request for version output. Treats `--version`, `-V`, and the
+ * single-dash typo `-version` as version flags anywhere in argv. `-v` keeps
+ * its role as the short alias for `--verbose`, except when used alone — then
+ * it falls back to version output to match the convention used by node, npm,
+ * bun, and most other CLIs.
+ */
+function isVersionRequest(args: string[]): boolean {
+  if (args.length === 1 && args[0] === '-v') return true;
+  for (const arg of args) {
+    if (arg === '--version' || arg === '-V' || arg === '-version') return true;
+  }
+  return false;
+}
+
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
 
@@ -177,6 +193,18 @@ async function main(): Promise<number> {
   if (args.length === 0) {
     printUsage();
     return 0;
+  }
+
+  // Version flag aliases bypass option parsing and the git-repo check so
+  // `archon --version` works the same as `archon version` from any directory.
+  if (isVersionRequest(args)) {
+    try {
+      await versionCommand();
+      return 0;
+    } finally {
+      await shutdownTelemetry();
+      await closeDb();
+    }
   }
 
   // Parse global options
@@ -204,9 +232,10 @@ async function main(): Promise<number> {
         reason: { type: 'string' },
         workflow: { type: 'string' },
         'no-context': { type: 'boolean' },
-        'allow-env-keys': { type: 'boolean' },
         port: { type: 'string' },
         'download-only': { type: 'boolean' },
+        scope: { type: 'string' },
+        force: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: false, // Allow unknown flags to pass through
@@ -228,7 +257,6 @@ async function main(): Promise<number> {
   const resumeFlag = values.resume as boolean | undefined;
   const spawnFlag = values.spawn as boolean | undefined;
   const jsonFlag = values.json as boolean | undefined;
-  const allowEnvKeysFlag = values['allow-env-keys'] as boolean | undefined;
 
   // Handle help flag
   if (values.help) {
@@ -241,7 +269,16 @@ async function main(): Promise<number> {
   const subcommand = positionals[1];
 
   // Commands that don't require git repo validation
-  const noGitCommands = ['version', 'help', 'setup', 'chat', 'continue', 'serve'];
+  const noGitCommands = [
+    'version',
+    'help',
+    'setup',
+    'chat',
+    'continue',
+    'serve',
+    'skill',
+    'doctor',
+  ];
   const requiresGitRepo = !noGitCommands.includes(command ?? '');
 
   try {
@@ -295,9 +332,30 @@ async function main(): Promise<number> {
         break;
       }
 
-      case 'setup':
-        await setupCommand({ spawn: spawnFlag, repoPath: cwd });
+      case 'setup': {
+        const rawScope = values.scope as string | undefined;
+        if (rawScope !== undefined && rawScope !== 'home' && rawScope !== 'project') {
+          console.error(`Error: Invalid --scope: "${rawScope}". Must be "home" or "project".`);
+          return 1;
+        }
+        const scope: 'home' | 'project' = rawScope ?? 'home';
+        const forceFlag = (values.force as boolean | undefined) ?? false;
+        // For --scope project, resolve to the git repo root so running from a
+        // subdirectory writes to <repo-root>/.archon/.env (what loadArchonEnv
+        // reads at boot) — not <subdir>/.archon/.env.
+        let repoPath = cwd;
+        if (scope === 'project') {
+          const repoRoot = await git.findRepoRoot(cwd);
+          if (!repoRoot) {
+            console.error('Error: --scope project requires running from inside a git repository.');
+            console.error('Run from the repo root, pass --cwd <repo>, or use --scope home.');
+            return 1;
+          }
+          repoPath = repoRoot;
+        }
+        await setupCommand({ spawn: spawnFlag, repoPath, scope, force: forceFlag });
         break;
+      }
 
       case 'workflow':
         switch (subcommand) {
@@ -341,7 +399,6 @@ async function main(): Promise<number> {
               fromBranch,
               noWorktree,
               resume: resumeFlag,
-              allowEnvKeys: allowEnvKeysFlag,
               quiet: values.quiet as boolean | undefined,
               verbose: values.verbose as boolean | undefined,
             };
@@ -554,6 +611,30 @@ async function main(): Promise<number> {
         return await serveCommand({ port: servePort, downloadOnly });
       }
 
+      case 'doctor': {
+        return await doctorCommand();
+      }
+
+      case 'skill': {
+        switch (subcommand) {
+          case 'install': {
+            // Optional positional path; otherwise install into the resolved cwd.
+            const targetArg = positionals[2];
+            const targetPath = targetArg ? resolve(targetArg) : cwd;
+            return await skillInstallCommand(targetPath);
+          }
+
+          default:
+            if (subcommand === undefined) {
+              console.error('Missing skill subcommand');
+            } else {
+              console.error(`Unknown skill subcommand: ${subcommand}`);
+            }
+            console.error('Available: install');
+            return 1;
+        }
+      }
+
       default:
         if (command === undefined) {
           console.error('Missing command');
@@ -573,6 +654,9 @@ async function main(): Promise<number> {
     }
     return 1;
   } finally {
+    // Flush queued telemetry events before the CLI process exits.
+    // Short-lived CLI commands lose buffered events if shutdown() is skipped.
+    await shutdownTelemetry();
     // Always close database connection
     await closeDb();
   }

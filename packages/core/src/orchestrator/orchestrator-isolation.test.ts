@@ -10,6 +10,7 @@ const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
   getArchonWorkspacesPath: mock(() => '/home/test/.archon/workspaces'),
+  ensureArchonWorkspacesPath: mock(() => Promise.resolve('/home/test/.archon/workspaces')),
   getArchonHome: mock(() => '/home/test/.archon'),
 }));
 
@@ -62,14 +63,14 @@ mock.module('../handlers/command-handler', () => ({
   })),
 }));
 
-mock.module('../clients/factory', () => ({
-  getAssistantClient: mock(() => null),
+mock.module('@archon/providers', () => ({
+  getAgentProvider: mock(() => null),
 }));
 
 mock.module('../workflows/store-adapter', () => ({
   createWorkflowDeps: mock(() => ({
     store: {},
-    getAssistantClient: () => ({}),
+    getAgentProvider: () => ({}),
     loadConfig: async () => ({}),
   })),
 }));
@@ -188,7 +189,6 @@ function makeCodebase(overrides?: Partial<Codebase>): Codebase {
     id: 'cb-1',
     name: 'test-repo',
     default_cwd: '/workspace/test-repo',
-    allow_env_keys: false,
     commands: {},
     created_at: new Date(),
     updated_at: new Date(),

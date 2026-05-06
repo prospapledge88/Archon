@@ -23,6 +23,25 @@ function dateExtract(): string {
   return getDatabaseType() === 'postgresql' ? 'DATE(started_at)' : "DATE(started_at, 'utc')";
 }
 
+/**
+ * Dialect-aware `started_at >= param` filter.
+ *
+ * SQLite stores datetimes as TEXT with space separator
+ * (`2026-04-14 13:53:10`). When callers pass ISO-T format
+ * (`2026-04-14T00:00:00.000Z`), byte-wise comparison drops
+ * legitimate rows (T > space). `datetime()` normalizes both
+ * sides and returns NULL for unparseable input, which
+ * excludes the row safely.
+ *
+ * PostgreSQL's `timestamp` type handles implicit string
+ * casts correctly, so the wrap is only needed for SQLite.
+ */
+function startedAtSinceFilter(placeholder: number): string {
+  return getDatabaseType() === 'postgresql'
+    ? `started_at >= $${placeholder}`
+    : `datetime(started_at) >= datetime($${placeholder})`;
+}
+
 export interface WorkflowCostRow {
   workflow_name: string;
   status: string;
@@ -61,7 +80,7 @@ export async function getCostByWorkflow(sinceDate: string): Promise<WorkflowCost
         COUNT(*) as run_count,
         SUM(${jsonCostExtract()}) as cost_usd
       FROM remote_agent_workflow_runs
-      WHERE started_at >= $1
+      WHERE ${startedAtSinceFilter(1)}
         AND status IN ('completed', 'failed')
       GROUP BY workflow_name, status
       ORDER BY cost_usd DESC`,
@@ -89,7 +108,7 @@ export async function getDailyCosts(sinceDate: string): Promise<DailyCostRow[]> 
         COUNT(*) as run_count,
         SUM(${jsonCostExtract()}) as cost_usd
       FROM remote_agent_workflow_runs
-      WHERE started_at >= $1
+      WHERE ${startedAtSinceFilter(1)}
         AND status IN ('completed', 'failed')
       GROUP BY ${dateExtract()}
       ORDER BY date ASC`,
@@ -121,7 +140,7 @@ export async function getAvgDuration(sinceDate: string): Promise<number> {
     const result = await pool.query<{ avg_seconds: string | number | null }>(
       `SELECT AVG(${durationExpr}) as avg_seconds
        FROM remote_agent_workflow_runs
-       WHERE started_at >= $1
+       WHERE ${startedAtSinceFilter(1)}
          AND status IN ('completed', 'failed')
          AND completed_at IS NOT NULL
          AND completed_at >= started_at`,

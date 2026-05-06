@@ -1,0 +1,112 @@
+name: archon-skill-sync
+description: |
+  Use when: User wants to sync shared Claude Code skills from the central claude-skills repo
+  to all target repositories, keeping skills consistent across projects.
+  Triggers: "sync skills", "skill sync", "update skills", "push skills out",
+            "sync shared skills", "distribute skills".
+  Does: Pulls latest central repo -> diffs each skill against targets -> copies changed skills ->
+        creates a branch + commit + PR in each repo that has changes.
+  NOT for: Editing skills (edit in claude-skills repo first), adding new skills to manifest,
+           project-specific skills that shouldn't be shared.
+
+nodes:
+  - id: pull-central
+    bash: |
+      SKILLS_REPO="${CLAUDE_SKILLS_REPO:-${ARCHON_HOME:-$HOME/.archon}/workspaces/claude-skills}"
+      if [ ! -d "$SKILLS_REPO" ]; then
+        echo "ERROR: claude-skills repo not found at $SKILLS_REPO" >&2
+        echo "Set CLAUDE_SKILLS_REPO to override, or clone it to the default path." >&2
+        exit 1
+      fi
+      cd "$SKILLS_REPO"
+      git pull origin main 2>&1 || echo "Already up to date or not tracking remote"
+      echo "Central repo ready at $(pwd)"
+      echo "Skills count: $(find skills/ -name 'SKILL.md' | wc -l | tr -d ' ')"
+
+  - id: detect-drift
+    depends_on: [pull-central]
+    bash: |
+      SKILLS_REPO="${CLAUDE_SKILLS_REPO:-${ARCHON_HOME:-$HOME/.archon}/workspaces/claude-skills}"
+      cd "$SKILLS_REPO"
+      MANIFEST="manifest.json"
+      CHANGES_FILE="/tmp/skill-sync-changes.json"
+
+      echo '{"repos":{}}' > "$CHANGES_FILE"
+
+      for SKILL_KEY in $(jq -r '.skills | keys[]' "$MANIFEST"); do
+        SKILL_SRC="skills/$SKILL_KEY"
+        TARGET_PATH=$(jq -r ".skills[\"$SKILL_KEY\"].target_path" "$MANIFEST")
+        TARGETS=$(jq -r ".skills[\"$SKILL_KEY\"].targets[]" "$MANIFEST" 2>/dev/null || true)
+
+        [ -z "$TARGETS" ] && continue
+
+        for TARGET_REPO in $TARGETS; do
+          LOCAL_PATH=$(jq -r ".projects[\"$TARGET_REPO\"].local_path" "$MANIFEST")
+          DEST="$LOCAL_PATH/$TARGET_PATH"
+
+          [ ! -d "$LOCAL_PATH" ] && continue
+
+          if [ -d "$DEST" ]; then
+            DIFF=$(diff -rq "$SKILL_SRC" "$DEST" 2>/dev/null || true)
+            [ -z "$DIFF" ] && continue
+            STATUS="changed"
+          else
+            STATUS="new"
+          fi
+
+          # Append to changes JSON
+          EXISTING=$(jq -r ".repos[\"$TARGET_REPO\"] // \"[]\"" "$CHANGES_FILE")
+          jq --arg repo "$TARGET_REPO" \
+             --arg skill "$SKILL_KEY" \
+             --arg status "$STATUS" \
+             --arg src "$SKILL_SRC" \
+             --arg dest "$DEST" \
+             '.repos[$repo] += [{"skill": $skill, "status": $status, "src": $src, "dest": $dest}]' \
+             "$CHANGES_FILE" > "${CHANGES_FILE}.tmp" && mv "${CHANGES_FILE}.tmp" "$CHANGES_FILE"
+        done
+      done
+
+      echo "=== Drift Detection Results ==="
+      REPO_COUNT=$(jq '.repos | keys | length' "$CHANGES_FILE")
+      TOTAL_CHANGES=$(jq '[.repos[] | length] | add // 0' "$CHANGES_FILE")
+      echo "Repos with drift: $REPO_COUNT"
+      echo "Total skill changes: $TOTAL_CHANGES"
+      echo ""
+      jq -r '.repos | to_entries[] | "\(.key): \(.value | length) skill(s) to update"' "$CHANGES_FILE"
+      echo ""
+      echo "Details saved to $CHANGES_FILE"
+      cat "$CHANGES_FILE"
+
+  - id: sync-and-pr
+    depends_on: [detect-drift]
+    prompt: |
+      You are the skill sync agent. Your job is to copy changed skills from the central
+      claude-skills repo into target repos and create PRs for each.
+
+      ## Drift Detection Output
+      $detect-drift.output
+
+      ## Instructions
+
+      1. Read `/tmp/skill-sync-changes.json` to see which repos need updates
+      2. If there are NO changes (0 repos with drift), report "All skills are in sync" and stop
+      3. For each repo with changes:
+         a. `cd` to the repo's local path
+         b. Make sure you're on the main/master branch and it's clean
+         c. Create a branch: `chore/sync-skills-YYYY-MM-DD`
+         d. For each changed skill, use rsync to copy from the central repo:
+            `rsync -a --delete <src>/ <dest>/`
+         e. Stage the changes: `git add .claude/skills/`
+         f. Commit with message: "chore: sync shared skills from claude-skills central repo"
+         g. Push the branch
+         h. Create a PR using `gh pr create` with title "chore: sync shared skills" and body listing what changed
+      4. Report a summary of all PRs created
+
+      ## Important
+      - Do NOT modify the central repo
+      - Do NOT force push or use destructive git commands
+      - If a repo has uncommitted changes, skip it and report why
+      - The central skills repo path is available via `$CLAUDE_SKILLS_REPO` if set,
+        otherwise defaults to `${ARCHON_HOME:-$HOME/.archon}/workspaces/claude-skills`
+    context: fresh
+    model: claude-opus-4-6

@@ -26,6 +26,8 @@ describe('CLI argument parsing', () => {
         spawn: { type: 'boolean' },
         quiet: { type: 'boolean', short: 'q' },
         verbose: { type: 'boolean', short: 'v' },
+        scope: { type: 'string' },
+        force: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: false,
@@ -151,6 +153,58 @@ describe('CLI argument parsing', () => {
     });
   });
 
+  describe('version flag detection', () => {
+    /**
+     * Duplicates the isVersionRequest() helper from cli.ts (which is not
+     * exported — importing cli.ts would execute its top-level main()). Must
+     * be updated manually if the source logic changes.
+     */
+    const isVersionRequest = (args: string[]): boolean => {
+      if (args.length === 1 && args[0] === '-v') return true;
+      for (const arg of args) {
+        if (arg === '--version' || arg === '-V' || arg === '-version') return true;
+      }
+      return false;
+    };
+
+    it('detects --version', () => {
+      expect(isVersionRequest(['--version'])).toBe(true);
+    });
+
+    it('detects -V (uppercase short flag)', () => {
+      expect(isVersionRequest(['-V'])).toBe(true);
+    });
+
+    it('detects -version (single-dash typo)', () => {
+      expect(isVersionRequest(['-version'])).toBe(true);
+    });
+
+    it('treats lone -v as a version request', () => {
+      expect(isVersionRequest(['-v'])).toBe(true);
+    });
+
+    it('treats -v with other args as --verbose (NOT a version request)', () => {
+      expect(isVersionRequest(['-v', 'workflow', 'list'])).toBe(false);
+      expect(isVersionRequest(['workflow', '-v', 'list'])).toBe(false);
+    });
+
+    it('does not treat the literal "version" command as a flag-style request', () => {
+      // The `version` positional command is handled by the existing switch,
+      // not the early flag bypass. isVersionRequest should not match it.
+      expect(isVersionRequest(['version'])).toBe(false);
+    });
+
+    it('detects --version anywhere in argv', () => {
+      expect(isVersionRequest(['--cwd', '/foo', '--version'])).toBe(true);
+    });
+
+    it('returns false for unrelated args', () => {
+      expect(isVersionRequest(['workflow', 'list'])).toBe(false);
+      expect(isVersionRequest(['help'])).toBe(false);
+      expect(isVersionRequest([])).toBe(false);
+    });
+  });
+
   describe('unknown flags with strict: false', () => {
     it('should pass through unknown flags', () => {
       const result = parseCliArgs(['--unknown', 'workflow', 'list']);
@@ -163,6 +217,35 @@ describe('CLI argument parsing', () => {
       // Typo is ignored, --cwd defaults to process.cwd()
       expect(result.values.cwd).toBe(process.cwd());
       expect(result.positionals).toContain('/path'); // /path becomes positional
+    });
+  });
+
+  describe('setup --scope and --force flags (#1303)', () => {
+    it('parses --scope home', () => {
+      const result = parseCliArgs(['setup', '--scope', 'home']);
+      expect(result.values.scope).toBe('home');
+    });
+
+    it('parses --scope project', () => {
+      const result = parseCliArgs(['setup', '--scope', 'project']);
+      expect(result.values.scope).toBe('project');
+    });
+
+    it('defaults --scope to undefined when not provided', () => {
+      const result = parseCliArgs(['setup']);
+      expect(result.values.scope).toBeUndefined();
+    });
+
+    it('parses --force as boolean', () => {
+      const result = parseCliArgs(['setup', '--force']);
+      expect(result.values.force).toBe(true);
+    });
+
+    it('captures an invalid --scope value verbatim for caller validation', () => {
+      // parseArgs itself does not validate the enum; cli.ts validates and
+      // exits on unknown scope values. The test documents the contract.
+      const result = parseCliArgs(['setup', '--scope', 'nonsense']);
+      expect(result.values.scope).toBe('nonsense');
     });
   });
 });

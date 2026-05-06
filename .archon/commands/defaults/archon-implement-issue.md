@@ -132,28 +132,30 @@ git status
 
 ### 3.2 Decision Tree
 
-```
+```text
 ┌─ IN WORKTREE?
-│  └─ YES → Use it (assume it's for this work)
-│           Log: "Using worktree at {path}"
+│  └─ YES → Use current branch AS-IS. Do NOT switch branches. Do NOT create
+│           new branches. The isolation system has already set up the correct
+│           branch; any deviation operates on the wrong code.
+│           Log: "Using worktree at {path} on branch {branch}"
 │
-├─ ON MAIN/MASTER?
+├─ ON $BASE_BRANCH? (main, master, or configured base branch)
 │  └─ Q: Working directory clean?
 │     ├─ YES → Create branch: fix/issue-{number}-{slug}
 │     │        git checkout -b fix/issue-{number}-{slug}
-│     └─ NO  → Warn user:
-│              "Working directory has uncommitted changes.
-│               Please commit or stash before proceeding."
-│              STOP
+│     │        (only applies outside a worktree — e.g., manual CLI usage)
+│     └─ NO  → STOP: "Uncommitted changes on $BASE_BRANCH.
+│              Please commit or stash before proceeding."
 │
-├─ ON FEATURE/FIX BRANCH?
-│  └─ Use it (assume it's for this work)
+├─ ON OTHER BRANCH?
+│  └─ Use it AS-IS (assume it was set up for this work).
+│     Do NOT switch to another branch (e.g., one shown by `git branch` but
+│     not currently checked out).
 │     If branch name doesn't contain issue number:
 │       Warn: "Branch '{name}' may not be for issue #{number}"
 │
 └─ DIRTY STATE?
-   └─ Warn and suggest: git stash or git commit
-      STOP
+   └─ STOP: "Uncommitted changes. Please commit or stash first."
 ```
 
 ### 3.3 Ensure Up-to-Date
@@ -293,10 +295,18 @@ Execute any manual verification steps from the artifact.
 
 ### 7.1 Stage Changes
 
+Stage **only** the files you actually edited — never `git add -A`, `git add .`, or `git add -u`. List them by name:
+
 ```bash
-git add -A
-git status  # Review what's being committed
+git add path/to/file1 path/to/file2 ...
+git status --porcelain  # verify nothing scratch/review/PR-body is staged
 ```
+
+**Never stage**:
+
+- `.pr-body.md`, `pr-body.md`, `*.scratch.md`, `*.tmp.md`
+- `review/`, `*-report.md` at the repo root
+- Anything under `$ARTIFACTS_DIR`
 
 ### 7.2 Write Commit Message
 
@@ -365,7 +375,8 @@ Write the prepared body to `$ARTIFACTS_DIR/pr-body.md`, then:
 
 ```bash
 gh pr create --title "Fix: {title} (#{number})" \
-  --body-file $ARTIFACTS_DIR/pr-body.md
+  --body-file $ARTIFACTS_DIR/pr-body.md \
+  --base $BASE_BRANCH
 ```
 
 ### 8.3 Get PR Number

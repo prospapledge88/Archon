@@ -4,8 +4,13 @@
 import type { WorkflowDefinition, WorkflowLoadError, DagNode, WorkflowNodeHooks } from './schemas';
 import { isLoopNode, isApprovalNode, isCancelNode, isScriptNode } from './schemas';
 import { createLogger } from '@archon/paths';
-import { isModelCompatible } from './model-validation';
-import { dagNodeSchema, BASH_NODE_AI_FIELDS, SCRIPT_NODE_AI_FIELDS } from './schemas/dag-node';
+import { isRegisteredProvider, getRegisteredProviders } from '@archon/providers';
+import {
+  dagNodeSchema,
+  BASH_NODE_AI_FIELDS,
+  SCRIPT_NODE_AI_FIELDS,
+  LOOP_NODE_AI_FIELDS,
+} from './schemas/dag-node';
 import { modelReasoningEffortSchema, webSearchModeSchema } from './schemas/workflow';
 import { workflowNodeHooksSchema } from './schemas/hooks';
 import { z } from '@hono/zod-openapi';
@@ -56,29 +61,27 @@ function parseDagNode(raw: unknown, index: number, errors: string[]): DagNode | 
   const node = result.data;
 
   // Warn about AI-specific fields on non-AI nodes (runtime behavior, not schema errors)
-  const isNonAiNode =
-    ('bash' in node && typeof node.bash === 'string') ||
-    isScriptNode(node) ||
-    isLoopNode(node) ||
-    isApprovalNode(node) ||
-    isCancelNode(node);
-  if (isNonAiNode) {
-    let nodeType: string;
-    if (isCancelNode(node)) {
-      nodeType = 'cancel';
-    } else if (isApprovalNode(node)) {
-      nodeType = 'approval';
-    } else if (isLoopNode(node)) {
-      nodeType = 'loop';
-    } else if (isScriptNode(node)) {
-      nodeType = 'script';
-    } else {
-      nodeType = 'bash';
-    }
-    const aiFields = isScriptNode(node) ? SCRIPT_NODE_AI_FIELDS : BASH_NODE_AI_FIELDS;
-    const presentAiFields = aiFields.filter(f => (raw as Record<string, unknown>)[f] !== undefined);
+  let nonAiNode: { type: string; fields: readonly string[] } | undefined;
+  if (isCancelNode(node)) {
+    nonAiNode = { type: 'cancel', fields: BASH_NODE_AI_FIELDS };
+  } else if (isApprovalNode(node)) {
+    nonAiNode = { type: 'approval', fields: BASH_NODE_AI_FIELDS };
+  } else if (isLoopNode(node)) {
+    nonAiNode = { type: 'loop', fields: LOOP_NODE_AI_FIELDS };
+  } else if (isScriptNode(node)) {
+    nonAiNode = { type: 'script', fields: SCRIPT_NODE_AI_FIELDS };
+  } else if ('bash' in node && typeof node.bash === 'string') {
+    nonAiNode = { type: 'bash', fields: BASH_NODE_AI_FIELDS };
+  }
+  if (nonAiNode) {
+    const presentAiFields = nonAiNode.fields.filter(
+      f => (raw as Record<string, unknown>)[f] !== undefined
+    );
     if (presentAiFields.length > 0) {
-      getLog().warn({ id: node.id, fields: presentAiFields }, `${nodeType}_node_ai_fields_ignored`);
+      getLog().warn(
+        { id: node.id, fields: presentAiFields },
+        `${nonAiNode.type}_node_ai_fields_ignored`
+      );
     }
   }
 
@@ -140,14 +143,25 @@ function validateDagStructure(nodes: DagNode[]): string | null {
     return `Cycle detected among nodes: ${cycleNodes.join(', ')}`;
   }
 
-  // Check $nodeId.output references in when: and prompt: fields
+  // Check $nodeId.output references in when: and prompt: fields.
+  // Triple-backtick fenced blocks and single-backtick inline code inside a
+  // prompt body are documentation meant to render literally to the LLM
+  // (e.g. the workflow-builder shows authors how to write
+  // `$<other-node>.output` inside a script-node example); strip them before
+  // scanning so they don't false-match as real cross-node references. when:
+  // clauses are JS-like expressions and never carry markdown code, so they
+  // pass through unchanged.
   const outputRefPattern = /\$([a-zA-Z_][a-zA-Z0-9_-]*)\.output/g;
+  const stripMarkdownCode = (s: string): string =>
+    s.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '');
   for (const node of nodes) {
     const sources: string[] = [];
     if (node.when) sources.push(node.when);
-    if ('prompt' in node && typeof node.prompt === 'string') sources.push(node.prompt);
+    if ('prompt' in node && typeof node.prompt === 'string') {
+      sources.push(stripMarkdownCode(node.prompt));
+    }
     if (isLoopNode(node)) {
-      sources.push(node.loop.prompt);
+      sources.push(stripMarkdownCode(node.loop.prompt));
     }
     for (const source of sources) {
       let m: RegExpExecArray | null;
@@ -271,19 +285,38 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
     // Note: modelReasoningEffort and webSearchMode use warn-and-ignore for invalid values
     // (consistent with original behavior) rather than schema-level rejection.
     const provider =
-      raw.provider === 'claude' || raw.provider === 'codex' ? raw.provider : undefined;
+      typeof raw.provider === 'string' && raw.provider.length > 0 ? raw.provider : undefined;
     const model = typeof raw.model === 'string' ? raw.model : undefined;
 
-    // Validate model/provider compatibility at workflow level
-    if (provider && model && !isModelCompatible(provider, model)) {
+    // Validate provider identity at load time, both at the workflow level and
+    // per node. Model strings are NOT validated — they pass through to the SDK
+    // at run time, which is the source of truth for what model names exist
+    // (vendor SDKs ship new models faster than Archon can update).
+    if (provider && !isRegisteredProvider(provider)) {
       return {
         workflow: null,
         error: {
           filename,
-          error: `Model "${model}" is not compatible with provider "${provider}"`,
+          error: `Unknown provider '${provider}'. Registered: ${getRegisteredProviders()
+            .map(p => p.id)
+            .join(', ')}`,
           errorType: 'validation_error',
         },
       };
+    }
+    for (const node of dagNodes) {
+      if (node.provider !== undefined && !isRegisteredProvider(node.provider)) {
+        return {
+          workflow: null,
+          error: {
+            filename,
+            error: `Node '${node.id}': unknown provider '${node.provider}'. Registered: ${getRegisteredProviders()
+              .map(p => p.id)
+              .join(', ')}`,
+            errorType: 'validation_error',
+          },
+        };
+      }
     }
 
     // Validate modelReasoningEffort — warn and ignore invalid values (preserve original behavior)
@@ -335,6 +368,62 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
       }
     }
 
+    // Parse mutates_checkout — boolean, omitted means true (run the path-lock guard).
+    // Same parse/warn pattern as `interactive` (invalid non-boolean values are dropped).
+    // When false, the executor skips the path-lock guard and allows concurrent runs on the same checkout.
+    let mutatesCheckout: boolean | undefined;
+    if (raw.mutates_checkout !== undefined) {
+      if (typeof raw.mutates_checkout === 'boolean') {
+        mutatesCheckout = raw.mutates_checkout;
+      } else {
+        getLog().warn(
+          { filename, value: raw.mutates_checkout },
+          'invalid_mutates_checkout_value_ignored'
+        );
+      }
+    }
+
+    // Parse optional tags — type-narrow, trim, and dedupe so authors can't
+    // ship ["GitLab", "GitLab ", "gitlab"] as three distinct values.
+    // An explicit empty array is preserved (suppresses keyword inference in the
+    // UI); an absent or invalid block leaves `tags` undefined (falls back to
+    // inference). Same warn-and-ignore pattern as `interactive` above.
+    let tags: string[] | undefined;
+    if (Array.isArray(raw.tags)) {
+      tags = [
+        ...new Set(
+          raw.tags
+            .filter((t): t is string => typeof t === 'string')
+            .map(t => t.trim())
+            .filter(t => t.length > 0)
+        ),
+      ];
+    } else if (raw.tags !== undefined) {
+      getLog().warn({ filename, value: raw.tags }, 'invalid_tags_block_ignored');
+    }
+
+    // Parse workflow-level worktree policy. Same warn-and-ignore pattern used
+    // for `interactive` / `modelReasoningEffort` — invalid values are dropped
+    // rather than rejected, so a typo in one workflow doesn't nuke the whole
+    // discovery pass. Only `worktree.enabled` is recognised today.
+    let worktreePolicy: { enabled?: boolean } | undefined;
+    if (raw.worktree !== undefined) {
+      if (
+        typeof raw.worktree === 'object' &&
+        raw.worktree !== null &&
+        !Array.isArray(raw.worktree)
+      ) {
+        const rawEnabled = (raw.worktree as Record<string, unknown>).enabled;
+        if (typeof rawEnabled === 'boolean') {
+          worktreePolicy = { enabled: rawEnabled };
+        } else if (rawEnabled !== undefined) {
+          getLog().warn({ filename, value: rawEnabled }, 'invalid_worktree_enabled_value_ignored');
+        }
+      } else {
+        getLog().warn({ filename, value: raw.worktree }, 'invalid_worktree_block_ignored');
+      }
+    }
+
     return {
       workflow: {
         name: raw.name,
@@ -345,7 +434,10 @@ export function parseWorkflow(content: string, filename: string): ParseResult {
         webSearchMode,
         additionalDirectories,
         interactive,
+        ...(mutatesCheckout !== undefined ? { mutates_checkout: mutatesCheckout } : {}),
+        ...(tags !== undefined ? { tags } : {}),
         nodes: dagNodes,
+        ...(worktreePolicy ? { worktree: worktreePolicy } : {}),
       },
       error: null,
     };
