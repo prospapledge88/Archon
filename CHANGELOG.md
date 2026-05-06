@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-06
+
+Catches the fork up to `coleam00/archon` upstream/dev (49 upstream commits across 8 cherry-pick batches: workflow polish, providers, web UI, db, reliability, paths/env unification, setup overhaul). Plus fork-local work: provider extraction into `@archon/providers`, prompt-injection defense, cost analytics, scheduled workflows, and security hardening (CWD `.env` strip, axios CVE-2025-62718 override).
+
 ### Changed
 
 - **Setup wizard simplified to AI + skippable adapters flow** (cherry-picked from upstream `5e61faf0`). The interactive `archon setup` no longer prompts for `Which database do you want to use?` (SQLite is now implicit; PostgreSQL still works — set `DATABASE_URL` in `.env` instead) and no longer prompts for Discord (the Discord adapter still ships and runs at runtime when `DISCORD_BOT_TOKEN` is set in `.env`; only the wizard step is gone). Users on existing `.env` files keep their database/Discord configuration unchanged. The wizard flow is now: AI provider → optional Telegram/Slack/GitHub adapters → confirm. New users wanting Postgres or Discord configure those manually.
