@@ -1,0 +1,297 @@
+name: archon-claude-plan-codex-build
+description: |
+  Use when: You want Claude (Opus 4.6) to plan deeply with archon-idea-to-pr-grade
+  rigor, and Codex to implement, run QA, and apply review fixes.
+  Input: Feature description in natural language, or path to a PRD file.
+  Output: PR ready for merge with comprehensive review applied.
+
+  Provider split:
+  - Plan creation, plan setup, plan confirmation: Claude (Opus 4.6 for the plan node)
+  - Implementation, QA test loop, review fix-ups: Codex (model inherited from
+    .archon/config.yaml — typically gpt-5.3-codex on ChatGPT-account auth)
+  - Code review fan-out, finalize PR, summary: Claude
+
+  Mirrors archon-idea-to-pr's planning depth (see archon-create-plan), swaps
+  Codex in for the build / test / fix phases.
+
+  NOT for: pure-Claude flows (use archon-idea-to-pr), pure-Codex flows,
+  quick fixes, standalone reviews.
+
+provider: claude
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 0: CREATE PLAN — Claude Opus 4.6
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: create-plan
+    command: archon-create-plan
+    context: fresh
+    model: claude-opus-4-6[1m]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: PLAN SETUP — Claude (default model: branch + scope extraction)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: plan-setup
+    command: archon-plan-setup
+    depends_on: [create-plan]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: CONFIRM PLAN — Claude (verify plan research is still valid)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: confirm-plan
+    command: archon-confirm-plan
+    depends_on: [plan-setup]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: IMPLEMENT — Codex (gpt-5.5-codex) executes the plan
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-codex
+    depends_on: [confirm-plan]
+    provider: codex
+    context: fresh
+    idle_timeout: 600000
+    prompt: |
+      You are Codex, the implementer for this workflow run.
+
+      Workflow ID: $WORKFLOW_ID
+      Plan: $ARTIFACTS_DIR/plan.md
+      Base branch: $BASE_BRANCH
+
+      ## Mission
+
+      Read the implementation plan at $ARTIFACTS_DIR/plan.md and execute every
+      task in it. The plan was written by Claude Opus 4.6 with deep codebase
+      analysis and is the source of truth. Your job is to translate that plan
+      into committed code.
+
+      ## Process
+
+      1. **Read the plan in full first.** Do not skim. Note phases, dependencies,
+         and the explicit scope limits the planner extracted.
+      2. **Read CLAUDE.md or AGENTS.md if present** — these define repo
+         conventions the plan may assume.
+      3. **Implement in the order the plan specifies.** Complete each phase
+         before moving to the next.
+      4. **After each task or phase:**
+         - Run `bun run type-check` (or the project's equivalent — check
+           package.json scripts for the right name).
+         - Fix any new type errors before continuing.
+         - Commit with a clear conventional-commit message that references the
+           phase or task.
+      5. **Stay in scope.** If you discover work outside the plan, write it to
+         `$ARTIFACTS_DIR/out-of-scope.md` and keep going.
+      6. **Do NOT run the full test suite here.** That is the next node's job.
+         Type-check only.
+
+      ## Hard rules
+
+      - Never use `--no-verify`, `// eslint-disable`, `@ts-ignore`, or similar
+        to bypass guardrails. Fix the underlying issue.
+      - Never silently swallow errors. If something is genuinely impossible
+        (the plan is wrong, a dependency is missing, etc.), STOP, write the
+        blocker to `$ARTIFACTS_DIR/blockers.md`, and exit non-zero.
+      - Stay strictly within the plan. The reviewer in a later phase will
+        catch anything you miss — do not pre-empt review work here.
+
+      ## Done
+
+      - Every non-blocked task in the plan is implemented and committed.
+      - `bun run type-check` (or equivalent) passes.
+      - All commits are pushed to the worktree's branch.
+
+      Begin.
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: QA LOOP — Codex runs full validate, fixes failures, iterates
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: qa-codex
+    depends_on: [implement-codex]
+    provider: codex
+    idle_timeout: 600000
+    loop:
+      until: QA_COMPLETE
+      max_iterations: 5
+      fresh_context: true
+      prompt: |
+        You are Codex, running QA for this workflow run.
+
+        Workflow ID: $WORKFLOW_ID
+        Plan: $ARTIFACTS_DIR/plan.md
+        Previous iteration's output (if any): $LOOP_PREV_OUTPUT
+
+        ## Mission
+
+        Run the project's full validation suite. If it passes, signal done.
+        If it fails, fix the failures and let the next iteration re-run.
+
+        ## Process
+
+        1. Run the full validation command. Try in this order:
+           - `bun run validate` (Archon-style projects)
+           - `npm run validate` (fallback)
+           - If neither exists, run: `bun run type-check && bun run lint && bun run test`
+             (or `npm`-equivalents).
+        2. **If validation passes cleanly:**
+           - Output `QA_COMPLETE` on its own line.
+           - Stop. Do not make further changes.
+        3. **If validation fails:**
+           - Read the failure output carefully.
+           - Identify the root cause. Do not just suppress the failure.
+           - Fix the code. Only fix the test if the test is genuinely wrong
+             relative to the plan.
+           - Commit the fix with a clear message that references the failure.
+           - Do NOT output `QA_COMPLETE` — the next iteration will re-validate.
+
+        ## Hard rules
+
+        - Never use `--no-verify`, `// eslint-disable`, `@ts-ignore`,
+          `it.skip`, `xit`, or `test.todo` to silence a failure. Fix the cause.
+        - Never delete a failing test. If the test is genuinely wrong, document
+          why in the commit message.
+        - If a failure is outside the plan's scope, write it to
+          `$ARTIFACTS_DIR/out-of-scope.md` and skip it (do not fix).
+        - After 5 iterations without `QA_COMPLETE`, the loop exits and the
+          workflow fails. That is intentional — long failure spirals deserve
+          human review.
+
+        Begin: run validation now.
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: FINALIZE PR — Claude (creates PR, fills template, marks ready)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: finalize-pr
+    command: archon-finalize-pr
+    depends_on: [qa-codex]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: VERIFY PR BASE
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: verify-pr-base
+    bash: |
+      set -euo pipefail
+      EXPECTED="$BASE_BRANCH"
+      ACTUAL=$(gh pr view --json baseRefName -q '.baseRefName')
+      if [ "$ACTUAL" != "$EXPECTED" ]; then
+        PR_NUMBER=$(gh pr view --json number -q '.number')
+        echo "Base mismatch on PR #$PR_NUMBER: expected=$EXPECTED actual=$ACTUAL — re-targeting" >&2
+        gh pr edit "$PR_NUMBER" --base "$EXPECTED"
+      else
+        echo "PR base verified: $EXPECTED"
+      fi
+    depends_on: [finalize-pr]
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 7: CODE REVIEW — Claude (5 parallel reviewers + synthesis)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: review-scope
+    command: archon-pr-review-scope
+    depends_on: [verify-pr-base]
+    context: fresh
+
+  - id: sync
+    command: archon-sync-pr-with-main
+    depends_on: [review-scope]
+    context: fresh
+
+  - id: code-review
+    command: archon-code-review-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: error-handling
+    command: archon-error-handling-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: test-coverage
+    command: archon-test-coverage-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: comment-quality
+    command: archon-comment-quality-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: docs-impact
+    command: archon-docs-impact-agent
+    depends_on: [sync]
+    context: fresh
+
+  - id: synthesize
+    command: archon-synthesize-review
+    depends_on: [code-review, error-handling, test-coverage, comment-quality, docs-impact]
+    trigger_rule: one_success
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 8: APPLY REVIEW FIXES — Codex (consistent: codex builds everything)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes-codex
+    depends_on: [synthesize]
+    provider: codex
+    context: fresh
+    idle_timeout: 600000
+    prompt: |
+      You are Codex, applying the synthesized review for this workflow run.
+
+      Workflow ID: $WORKFLOW_ID
+      Plan: $ARTIFACTS_DIR/plan.md
+      Synthesized review: $ARTIFACTS_DIR/review.md
+
+      ## Mission
+
+      Read the synthesized review and apply the actionable findings. The
+      review was produced by 5 specialised reviewers and synthesized into a
+      single decision document — treat it as authoritative for this PR.
+
+      ## Process
+
+      1. Read `$ARTIFACTS_DIR/review.md`. If that file is missing, list
+         `$ARTIFACTS_DIR` and find the synthesized review file (the most
+         recent review-related markdown).
+      2. Group findings by severity (MUST / HIGH / SHOULD / NICE-TO-HAVE).
+         Apply MUST and HIGH first.
+      3. For each finding:
+         - Make the change.
+         - Run `bun run type-check` (or equivalent).
+         - Commit with a message that references the finding (e.g.
+           "fix(review): handle null in parseConfig — addresses MUST #2").
+         - Push.
+      4. After all in-scope findings are applied, run the full validation:
+         - `bun run validate` (or equivalent).
+         - If it fails, fix once more. If it still fails, write the residual
+           failures to `$ARTIFACTS_DIR/residual-failures.md` and stop.
+
+      ## Hard rules
+
+      - Never apply review feedback that contradicts the original plan without
+        flagging it. Write conflicts to `$ARTIFACTS_DIR/conflicts.md` and skip
+        them — do not silently override the plan.
+      - Never use `--no-verify`, `// eslint-disable`, `@ts-ignore`, etc.
+      - Never disable a test to silence a finding.
+      - If the review asks for something out of scope of the original plan,
+        write it to `$ARTIFACTS_DIR/follow-up.md` and skip it.
+
+      Begin.
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 9: WORKFLOW SUMMARY — Claude
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: workflow-summary
+    command: archon-workflow-summary
+    depends_on: [implement-fixes-codex]
+    context: fresh
