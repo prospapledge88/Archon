@@ -377,23 +377,11 @@ export class YourAssistantProvider implements IAgentProvider {
 }
 ```
 
-**3. Register in factory:** `packages/providers/src/factory.ts`
+**3. Register via the typed registry:** `packages/providers/src/registry.ts`
+
+Built-in providers are registered by `registerBuiltinProviders()`:
 
 ```typescript
-<<<<<<< HEAD
-import { YourAssistantProvider } from './your-assistant';
-
-export function getAgentProvider(type: string): IAgentProvider {
-  switch (type) {
-    case 'claude':
-      return new ClaudeProvider();
-    case 'codex':
-      return new CodexProvider();
-    case 'your-assistant':
-      return new YourAssistantProvider();
-    default:
-      throw new Error(`Unknown provider type: ${type}`);
-=======
 export function registerBuiltinProviders(): void {
   const builtins: ProviderRegistration[] = [
     {
@@ -407,7 +395,6 @@ export function registerBuiltinProviders(): void {
   ];
   for (const entry of builtins) {
     if (!registry.has(entry.id)) registry.set(entry.id, entry);
->>>>>>> bf1f471e (refactor(workflows): trust the SDK for model validation (#1463))
   }
 }
 ```
